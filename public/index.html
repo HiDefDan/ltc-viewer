@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebSocket Variable Stream</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background-color: black;
+    }
+
+    div {
+      font-family: monospace;
+      color: red;
+      font-size: 60px;
+    }
+  </style>
+</head>
+<body>
+  <div id="dataDisplay"></div>
+  <script src="/socket.io.min.js"></script>
+  <script>
+    const socket = io();
+
+    socket.on('updateServerData', (data) => {
+      document.getElementById('dataDisplay').textContent = `${data}`;
+    });
+  </script>
+</body>
+</html>

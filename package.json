@@ -13,10 +13,16 @@
   "author": "Dan Hall",
   "license": "ISC",
   "dependencies": {
-    "libltc-wrapper": "^1.1.2"
-  }
-  "engines" : { 
-    "npm" : "^10.2.4",
-    "node" : "^21.6.1"
+    "audify": "^1.8.2",
+    "express": "^4.18.2",
+    "libltc-wrapper": "^1.1.2",
+    "socket.io": "^4.7.4"
+  },
+  "engines": {
+    "npm": "^10",
+    "node": "^21"
+  },
+  "devDependencies": {
+    "prettier": "3.2.4"
   }
 }
