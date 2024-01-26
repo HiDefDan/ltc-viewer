@@ -1,0 +1,22 @@
+{
+  "name": "ltc-viewer",
+  "version": "1.0.0",
+  "description": "Captures Linear Timecode audio signal and display on video output (and http)",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "LTC",
+    "timecode"
+  ],
+  "author": "Dan Hall",
+  "license": "ISC",
+  "dependencies": {
+    "libltc-wrapper": "^1.1.2"
+  }
+  "engines" : { 
+    "npm" : "^10.2.4",
+    "node" : "^21.6.1"
+  }
+}
