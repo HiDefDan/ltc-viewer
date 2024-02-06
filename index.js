@@ -14,7 +14,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIO(server);
 
-const frameSize = 1920;
+const frameSize = 1;
 
 rtAudio.openStream(
   null,
