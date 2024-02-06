@@ -5,32 +5,73 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WebSocket Variable Stream</title>
   <style>
+    @font-face {
+      font-family: 'DSEG7-Classic-MINI';
+      src: url('/fonts/fonts-DSEG_v046/DSEG7-Classic-MINI/DSEG7ClassicMini-BoldItalic.ttf') format('truetype');
+      font-weight: bold;
+      font-style: italic;
+    }
     body {
       margin: 0;
       padding: 0;
       height: 100vh;
       display: flex;
+      flex-direction: column; /* Stack items vertically */
       align-items: center;
       justify-content: center;
       background-color: black;
     }
-
     div {
-      font-family: monospace;
-      color: red;
-      font-size: 60px;
+      font-family: 'DSEG7-Classic-MINI';
+      color: white;
+      font-size: 96px;
+    }
+    #clock {
+      font-size: 2em;
+      text-align: center;
+    }
+    .flash {
+      animation: flash 1s infinite alternate;
+    }
+    @keyframes flash {
+      0% {
+        opacity: 1;
+      }
+      100% {
+        opacity: 0.3;
+      }
     }
   </style>
 </head>
 <body>
-  <div id="dataDisplay"></div>
-  <script src="/socket.io.min.js"></script>
-  <script>
-    const socket = io();
+  <div id="clock"></div>
 
-    socket.on('updateServerData', (data) => {
-      document.getElementById('dataDisplay').textContent = `${data}`;
-    });
-  </script>
-</body>
+    <script>
+      function updateClock() {
+        const now = new Date();
+        const hours = now.getHours().toString().padStart(2, '0');
+        const minutes = now.getMinutes().toString().padStart(2, '0');
+        const seconds = now.getSeconds().toString().padStart(2, '0');
+
+        const clockElement = document.getElementById('clock');
+        clockElement.innerHTML = `${hours}<span class="flash">:</span>${minutes}<span class="flash">:</span>${seconds}`;
+      }
+
+      // Initial update
+      updateClock();
+
+      // Update every second
+      setInterval(updateClock, 1000);
+    </script>
+
+    <div id="dataDisplay"></div>
+    <script src="/socket.io.min.js"></script>
+    <script>
+      const socket = io();
+
+      socket.on('updateServerData', (data) => {
+        document.getElementById('dataDisplay').textContent = `${data}`;
+      });
+    </script>
+  </body>
 </html>

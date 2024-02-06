@@ -14,8 +14,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIO(server);
 
-const frameSize = 0;
-
+const frameSize = 1920;
 
 rtAudio.openStream(
   null,
@@ -39,10 +38,10 @@ rtAudio.openStream(
       let framesDelim = frame.drop_frame_format ? ";" : ":";
 
       let formattedString = `${hh}:${mm}:${ss}${framesDelim}${ff}`;
-      // console.clear();
-      // process.stdout.write("\x1B[?25l"); // hide cursor
-      // process.stdout.write("\x1Bc"); // clear console
-      // process.stdout.write(formattedString);
+      console.clear();
+      process.stdout.write("\x1B[?25l"); // hide cursor
+      process.stdout.write("\x1Bc"); // clear console
+      process.stdout.write(formattedString);
       serverData = formattedString;
 
     }
@@ -81,7 +80,7 @@ setInterval(() => {
 
   // Send the updated variable to all connected clients
   io.emit('updateServerData', serverData);
-}, 1); // Update every 20ms (adjust as needed)
+}, 20); // Update every 20ms (adjust as needed)
 
 io.on('connection', (socket) => {
   console.log('Client connected');
@@ -95,7 +94,7 @@ io.on('connection', (socket) => {
   });
 });
 
-const port = 3000;
+const port = 80;
 server.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
 });
