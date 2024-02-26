@@ -71,7 +71,7 @@ app.get('/', (req, res) => {
 });
 
 // Define a variable to send to the client
-let serverData;
+let serverData = '88:88:88:88';
 
 // Update the variable at regular intervals and send it to the client
 setInterval(() => {

@@ -7,8 +7,7 @@
     <style>
       @font-face {
         font-family: "DSEG7-Classic-MINI";
-        src: url("/fonts/fonts-DSEG_v046/DSEG7-Classic-MINI/DSEG7ClassicMini-BoldItalic.ttf")
-          format("truetype");
+        src: url("fonts/DSEG7ClassicMini-BoldItalic.ttf") format("truetype");
         font-weight: bold;
         font-style: italic;
       }
@@ -18,24 +17,22 @@
         /* height: 100vh; */
         display: flex;
         flex-direction: column; /* Stack items vertically */
-        /* align-items: center;
-        justify-content: center; */
-        background-color: black;
+        background-color: #000000;
       }
       #container {
         position: relative;
         width: 100%;
-  height: 100%;
+        height: 100%;
       }
 
       #base,
       #dataDisplay {
-        padding-top: 428px;
+        padding-top: 278px;
         position: absolute;
         width: 100%;
         /* height: 200px; */
         font-family: "DSEG7-Classic-MINI";
-        font-size: 224px;
+        font-size: 164px;
         text-align: center;
       }
 
@@ -50,51 +47,11 @@
         left: 0; */
         /* background-color: red;*/
         color: rgb(188, 199, 204);
-        z-index: 1; 
+        z-index: 1;
       }
-
-      /* div {
-        font-family: "DSEG7-Classic-MINI";
-        color: white;
-        font-size: 256px;
-      } */
-      /* #clock {
-        font-size: 2em;
-        text-align: center;
-      } */
-      /* .flash {
-        animation: flash 1s infinite alternate;
-      }
-      @keyframes flash {
-        0% {
-          opacity: 1;
-        }
-        100% {
-          opacity: 0.3;
-        }
-      } */
     </style>
   </head>
   <body>
-    <!-- <div id="clock"></div>
-
-    <script>
-      function updateClock() {
-        const now = new Date();
-        const hours = now.getHours().toString().padStart(2, '0');
-        const minutes = now.getMinutes().toString().padStart(2, '0');
-        const seconds = now.getSeconds().toString().padStart(2, '0');
-
-        const clockElement = document.getElementById('clock');
-        clockElement.innerHTML = `${hours}<span class="flash">:</span>${minutes}<span class="flash">:</span>${seconds}`;
-      }
-
-      // Initial update
-      updateClock();
-
-      // Update every second
-      setInterval(updateClock, 1000);
-    </script> -->
     <div id="container">
       <div id="base">88:88:88:88</div>
       <div id="dataDisplay"></div>
