@@ -19,8 +19,8 @@
     "socket.io": "^4.7.4"
   },
   "engines": {
-    "npm": "^10",
-    "node": "^21"
+    "npm": "~9",
+    "node": "~19"
   },
   "devDependencies": {
     "prettier": "3.2.4"

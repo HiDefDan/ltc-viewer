@@ -35,14 +35,14 @@ rtAudio.openStream(
       let mm = padZero(frame.minutes);
       let ss = padZero(frame.seconds);
       let ff = padZero(frame.frames);
-      let framesDelim = frame.drop_frame_format ? ";" : ":";
 
-      let formattedString = `${hh}:${mm}:${ss}${framesDelim}${ff}`;
-      console.clear();
-      process.stdout.write("\x1B[?25l"); // hide cursor
-      process.stdout.write("\x1Bc"); // clear console
-      process.stdout.write(formattedString);
-      serverData = formattedString;
+      let formattedString = `${hh}.${mm}.${ss}.${ff}`;
+      // console.clear();
+      // process.stdout.write("\x1B[?25l"); // hide cursor
+      // process.stdout.write("\x1Bc"); // clear console
+      // process.stdout.write(formattedString);
+      serverData.formattedString = formattedString;
+      serverData.additionalParameter = frame.drop_frame_format ? "df" : "";
 
     }
   },
@@ -71,7 +71,10 @@ app.get('/', (req, res) => {
 });
 
 // Define a variable to send to the client
-let serverData = '88:88:88:88';
+let serverData = {
+  formattedString: "", // Placeholder for formatted string
+  additionalParameter: "" // Placeholder for additional parameter
+};
 
 // Update the variable at regular intervals and send it to the client
 setInterval(() => {
@@ -86,7 +89,7 @@ io.on('connection', (socket) => {
   console.log('Client connected');
 
   // Send the current value of the variable to the newly connected client
-  socket.emit('updateServerData', serverData);
+  socket.emit('updateServerData', {serverData});
 
   // Handle client disconnect
   socket.on('disconnect', () => {
