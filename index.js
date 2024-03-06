@@ -16,6 +16,9 @@ const io = socketIO(server);
 
 const frameSize = 1;
 
+//let currentValue = 0;
+//let peakValue = -Infinity;
+
 rtAudio.openStream(
   null,
   { deviceId: 129, nChannels: 1, firstChannel: 0 },
@@ -30,25 +33,28 @@ rtAudio.openStream(
     let frame = decoder.read();
     // console.log("Frame: ", frame);
     if (frame !== undefined) {
-      // console.log("Frame: ", frame);
+      //console.log("Frame: ", frame);
       let hh = padZero(frame.hours);
       let mm = padZero(frame.minutes);
       let ss = padZero(frame.seconds);
       let ff = padZero(frame.frames);
 
       let formattedString = `${hh}.${mm}.${ss}.${ff}`;
-      // console.clear();
-      // process.stdout.write("\x1B[?25l"); // hide cursor
-      // process.stdout.write("\x1Bc"); // clear console
-      // process.stdout.write(formattedString);
+      console.clear();
+      process.stdout.write("\x1B[?25l"); // hide cursor
+      process.stdout.write("\x1Bc"); // clear console
+      process.stdout.write(formattedString);
       serverData.formattedString = formattedString;
       serverData.additionalParameter = frame.drop_frame_format ? "df" : "";
 
+      //currentValue = frame.frames;
+      //if (currentValue > peakValue) {
+      //  peakValue = currentValue;
+      //}
+      //serverData.fps = peakValue;
     }
   },
 );
-
-// rtAudio.start();
 
 setTimeout(() => {
   try {
@@ -73,7 +79,8 @@ app.get('/', (req, res) => {
 // Define a variable to send to the client
 let serverData = {
   formattedString: "", // Placeholder for formatted string
-  additionalParameter: "" // Placeholder for additional parameter
+  additionalParameter: "", // Placeholder for additional parameter
+  fps: ""
 };
 
 // Update the variable at regular intervals and send it to the client
@@ -101,3 +108,5 @@ const port = 80;
 server.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
 });
+
+
