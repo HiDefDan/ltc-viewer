@@ -86,14 +86,15 @@ rtAudio.openStream(
         "Current fps :",
         getValueCategory(Math.round(updater.getMedianValue())),
       );
+      serverData.fps = getValueCategory(Math.round(updater.getMedianValue()));
     }
   },
 );
 
 function getValueCategory(value) {
-  if (value >= 2001 && value <= 2002) {
+  if (value >= 2001 && value <= 2003) {
     return "23.976";
-  } else if (value >= 1999 && value <= 2000) {
+  } else if (value >= 1999 && value <= 2001) {
     return "24";
   } else if (value >= 1919 && value <= 1921) {
     return "25";
@@ -103,7 +104,7 @@ function getValueCategory(value) {
     return "30";
   } // Add more ranges as needed
   else {
-    return "No dice !";
+    return "";
   }
 }
 
@@ -136,12 +137,12 @@ let serverData = {
 
 // Update the variable at regular intervals and send it to the client
 setInterval(() => {
-  // serverData++; // Update the variable (you can replace this with any logic)
+  
   rtAudio.start();
 
   // Send the updated variable to all connected clients
   io.emit("updateServerData", serverData);
-}, 20); // Update every 20ms (adjust as needed)
+}, 16); // Update every 16ms ( ~once per frame at 60Hz )
 
 io.on("connection", (socket) => {
   console.log("Client connected");
@@ -154,31 +155,6 @@ io.on("connection", (socket) => {
     console.log("Client disconnected");
   });
 });
-
-// Function to update the value
-function updateValue(newValue) {
-  if (newValue !== 0) {
-    // Calculate difference between current and last value
-    const difference = newValue - lastValue;
-
-    // Update last value
-    lastValue = newValue;
-
-    // Update sum of differences
-    sumOfDifferences += difference;
-
-    // Increment update counter
-    numUpdates++;
-  }
-}
-
-// Function to calculate average difference
-function calculateAverageDifference() {
-  if (numUpdates === 0) {
-    return 0; // Avoid division by zero
-  }
-  return sumOfDifferences / numUpdates;
-}
 
 const port = 80;
 server.listen(port, () => {
