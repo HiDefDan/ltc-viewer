@@ -59,11 +59,8 @@ rtAudio.openStream(
   frameSize,
   "MyStream",
   (pcm) => {
-    // console.log("pcm: ", pcm);
-    // process.stdout.write("pcm: " + pcm);
     decoder.write(pcm);
     let frame = decoder.read();
-    // console.log("Frame: ", frame);
     if (frame !== undefined) {
       //console.log("Frame: ", frame);
       let hh = padZero(frame.hours);
@@ -71,23 +68,34 @@ rtAudio.openStream(
       let ss = padZero(frame.seconds);
       let ff = padZero(frame.frames);
 
-      let formattedString = `${hh}.${mm}.${ss}.${ff}`;
-      process.stdout.write("\x1B[?25l"); // hide cursor
-      process.stdout.write("\x1Bc"); // clear console
-      // process.stdout.write(formattedString);
-      serverData.formattedString = formattedString;
-      serverData.additionalParameter = frame.drop_frame_format ? "df" : "";
+      let timecode = `${hh}.${mm}.${ss}.${ff}`;
+      // process.stdout.write("\x1B[?25l"); // hide cursor
+      // process.stdout.write("\x1Bc"); // clear console
+      // process.stdout.write(timecode);
+      serverData.timecode = timecode;
+      serverData.dropFrame = frame.drop_frame_format ? "df" : "";
 
-      // updateValue(frame.offset_start);
-      // const averageDifference = calculateAverageDifference();
-      // console.log(`frame period = ${Math.round(48000 / averageDifference)}`);
       updater.update(frame.offset_start);
-      console.log(
-        "Current fps :",
-        getValueCategory(Math.round(updater.getMedianValue())),
-      );
       serverData.fps = getValueCategory(Math.round(updater.getMedianValue()));
     }
+    // else {
+    //   // const currentTime = new Date();
+    //   // // // console.log('frame is undefined')
+    //   // let hh = padZero(currentTime.getHours());
+    //   // let mm = padZero(currentTime.getMinutes());
+    //   // let ss = padZero(currentTime.getSeconds());
+    //   // let ff =padZero(Math.floor(currentTime.getMilliseconds() / 40));
+
+    //   // let timeOfDay = `${hh}.${mm}.${ss}.${ff}`;
+    //   // // process.stdout.write("\x1B[?25l"); // hide cursor
+    //   // // process.stdout.write("\x1Bc"); // clear console
+    //   // // process.stdout.write(timecode);
+    //   // serverData.timecode = timeOfDay;
+    //   // serverData.dropFrame = "ToD";
+
+    //   // // updater.update(frame.offset_start);
+    //   // serverData.fps = "25";
+    // }
   },
 );
 
@@ -130,16 +138,15 @@ app.get("/", (req, res) => {
 
 // Define a variable to send to the client
 let serverData = {
-  formattedString: "", // Placeholder for formatted string
-  additionalParameter: "", // Placeholder for additional parameter
+  timecode: "", // Placeholder for formatted string
+  dropFrame: "", // Placeholder for additional parameter
   fps: "",
 };
 
+rtAudio.start();
+
 // Update the variable at regular intervals and send it to the client
 setInterval(() => {
-  
-  rtAudio.start();
-
   // Send the updated variable to all connected clients
   io.emit("updateServerData", serverData);
 }, 16); // Update every 16ms ( ~once per frame at 60Hz )

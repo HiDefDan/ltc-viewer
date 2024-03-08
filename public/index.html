@@ -96,14 +96,13 @@
     <script src="/socket.io.min.js"></script>
     <script>
       const socket = io();
+      let previousTimecode = null;
 
       socket.on("updateServerData", (data) => {
         document.getElementById("formattedString").textContent =
-          `${data.formattedString}`;
-        document.getElementById("df").textContent =
-          `${data.additionalParameter}`;
-        document.getElementById("fps").textContent =
-          `${data.fps}`;
+          `${data.timecode}`;
+        document.getElementById("df").textContent = `${data.dropFrame}`;
+        document.getElementById("fps").textContent = `${data.fps}`;
       });
     </script>
   </body>
