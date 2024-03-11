@@ -3,7 +3,7 @@ const { RtAudio, RtAudioFormat } = require("audify");
 // Init RtAudio instance using ALSA API
 const rtAudio = new RtAudio();
 const { LTCDecoder } = require("libltc-wrapper");
-const decoder = new LTCDecoder(48000, 25, "s16"); // 48khz, 25 fps, unsigned 8 bit
+const decoder = new LTCDecoder(48000, 30, "s16"); // 48khz, 25 fps, signed 16 bit
 
 const express = require("express");
 const http = require("http");
@@ -18,37 +18,36 @@ const frameSize = 1;
 
 class ValueUpdater {
   constructor() {
-    this.values = [];
-    this.lastValue = null;
-    this.medianValue = null;
+    this.frameOffsetArr = [];
+    this.lastFrameOffsetDiff = null;
+    this.medianOffset = null;
   }
 
   update(newValue) {
-    if (this.lastValue !== null) {
-      const difference = newValue - this.lastValue;
-      this.values.push(difference);
-      if (this.values.length > 90) {
-        this.values.shift(); // Remove oldest value
+    if (this.lastFrameOffsetDiff !== null) {
+      const difference = newValue - this.lastFrameOffsetDiff;
+      this.frameOffsetArr.push(difference);
+      if (this.frameOffsetArr.length > 90) {
+        this.frameOffsetArr.shift(); // Remove oldest value
       }
 
-      const sortedValues = this.values.slice().sort((a, b) => a - b);
+      const sortedValues = this.frameOffsetArr.slice().sort((a, b) => a - b);
       const mid = Math.floor(sortedValues.length / 2);
 
       if (sortedValues.length % 2 === 0) {
-        this.medianValue = (sortedValues[mid - 1] + sortedValues[mid]) / 2;
+        this.medianOffset = (sortedValues[mid - 1] + sortedValues[mid]) / 2;
       } else {
-        this.medianValue = sortedValues[mid];
+        this.medianOffset = sortedValues[mid];
       }
     }
-    this.lastValue = newValue;
+    this.lastFrameOffsetDiff = newValue;
   }
 
-  getMedianValue() {
-    return this.medianValue;
+  getMedianOffset() {
+    return this.medianOffset;
   }
 }
 
-// Example usage
 const updater = new ValueUpdater();
 
 rtAudio.openStream(
@@ -62,40 +61,21 @@ rtAudio.openStream(
     decoder.write(pcm);
     let frame = decoder.read();
     if (frame !== undefined) {
-      //console.log("Frame: ", frame);
-      let hh = padZero(frame.hours);
-      let mm = padZero(frame.minutes);
-      let ss = padZero(frame.seconds);
-      let ff = padZero(frame.frames);
+      // console.log("Frame: ", frame);
 
-      let timecode = `${hh}.${mm}.${ss}.${ff}`;
+      let hh = String(frame.hours).padStart(2, "0");
+      let mm = String(frame.minutes).padStart(2, "0");
+      let ss = String(frame.seconds).padStart(2, "0");
+      let ff = String(frame.frames).padStart(2, "0");
+
       // process.stdout.write("\x1B[?25l"); // hide cursor
       // process.stdout.write("\x1Bc"); // clear console
       // process.stdout.write(timecode);
-      serverData.timecode = timecode;
+      serverData.timecode = `${hh}.${mm}.${ss}.${ff}`;
       serverData.dropFrame = frame.drop_frame_format ? "df" : "";
-
       updater.update(frame.offset_start);
-      serverData.fps = getValueCategory(Math.round(updater.getMedianValue()));
+      serverData.fps = getValueCategory(Math.round(updater.getMedianOffset()));
     }
-    // else {
-    //   // const currentTime = new Date();
-    //   // // // console.log('frame is undefined')
-    //   // let hh = padZero(currentTime.getHours());
-    //   // let mm = padZero(currentTime.getMinutes());
-    //   // let ss = padZero(currentTime.getSeconds());
-    //   // let ff =padZero(Math.floor(currentTime.getMilliseconds() / 40));
-
-    //   // let timeOfDay = `${hh}.${mm}.${ss}.${ff}`;
-    //   // // process.stdout.write("\x1B[?25l"); // hide cursor
-    //   // // process.stdout.write("\x1Bc"); // clear console
-    //   // // process.stdout.write(timecode);
-    //   // serverData.timecode = timeOfDay;
-    //   // serverData.dropFrame = "ToD";
-
-    //   // // updater.update(frame.offset_start);
-    //   // serverData.fps = "25";
-    // }
   },
 );
 
@@ -123,11 +103,6 @@ setTimeout(() => {
     // console.log("RTAudio fixed, enjoy your stream.");
   }
 });
-
-// Helper function to pad zeros for single-digit values
-function padZero(value) {
-  return value < 10 ? `0${value}` : `${value}`;
-}
 
 // Serve static files from the 'public' directory
 app.use(express.static(path.join(__dirname, "public")));
@@ -159,11 +134,11 @@ io.on("connection", (socket) => {
 
   // Handle client disconnect
   socket.on("disconnect", () => {
-    console.log("Client disconnected");
+    // console.log("Client disconnected");
   });
 });
 
 const port = 80;
 server.listen(port, () => {
-  console.log(`Server is running on http://localhost:${port}`);
+  // console.log(`Server is running on http://localhost:${port}`);
 });
