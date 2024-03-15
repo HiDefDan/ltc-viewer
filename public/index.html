@@ -44,7 +44,7 @@
         text-align: center;
       }
       .timecode {
-        font-size: 96px;
+        font-size: 80px;
       }
 
       .info {
@@ -96,7 +96,7 @@
     <script src="/socket.io.min.js"></script>
     <script>
       const socket = io();
-      let previousTimecode = null;
+      // let previousTimecode = null;
 
       socket.on("updateServerData", (data) => {
         document.getElementById("formattedString").textContent =
