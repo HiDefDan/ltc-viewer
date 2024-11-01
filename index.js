@@ -2,7 +2,7 @@ const { RtAudio, RtAudioFormat } = require("audify");
 const { LTCDecoder } = require("libltc-wrapper");
 const express = require("express");
 const http = require("http");
-const socketIO = require("socket.io");
+const WebSocket = require("ws"); // Import WebSocket library
 const path = require("path");
 
 // Initialize RtAudio and LTCDecoder
@@ -11,7 +11,7 @@ const decoder = new LTCDecoder(48000, 30, "s16"); // 48khz, 30 fps, signed 16 bi
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIO(server);
+const wss = new WebSocket.Server({ server });
 
 const frameSize = 1;
 
@@ -117,20 +117,26 @@ let serverData = {
 
 rtAudio.start();
 
-// Update the variable at regular intervals and send it to the client
-setInterval(() => {
-  // Send the updated variable to all connected clients
-  io.emit("updateServerData", serverData);
-}, 30); // Update every 16ms ( ~once per frame at 60Hz )
+// Broadcast server data to all connected clients
+function broadcastData() {
+  const data = JSON.stringify(serverData);
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(data);
+    }
+  });
+}
 
-io.on("connection", (socket) => {
+// Update and broadcast the data at regular intervals
+setInterval(broadcastData, 30);
+
+wss.on("connection", (ws) => {
   console.log("Client connected");
 
-  // Send the current value of the variable to the newly connected client
-  socket.emit("updateServerData", { serverData });
+  // Send initial data to the newly connected client
+  ws.send(JSON.stringify(serverData));
 
-  // Handle client disconnect
-  socket.on("disconnect", () => {
+  ws.on("close", () => {
     // console.log("Client disconnected");
   });
 });

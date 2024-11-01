@@ -116,9 +116,8 @@
       </table>
     </div>
   </div>
-  <script src="/socket.io.min.js"></script>
   <script>
-    const socket = io();
+    const ws = new WebSocket("ws://" + window.location.host); // Establish a WebSocket connection
     let previousTimecode = null;  // Track the last received timecode
     let lastDataReceivedTime = Date.now();  // Track the time of the last update
     let dataTimeout;
@@ -130,12 +129,7 @@
       const hours = now.getHours().toString().padStart(2, '0');
       const minutes = now.getMinutes().toString().padStart(2, '0');
       const seconds = now.getSeconds().toString().padStart(2, '0');
-      const milliseconds = now.getMilliseconds();
 
-      // Divide milliseconds by 40 and floor it to get the 'ff' value
-      // const ff = Math.floor(milliseconds / 40).toString().padStart(2, '0');
-
-      // const timeString = `${hours}.${minutes}.${seconds}.${ff}`;
       const timeString = `${hours}.${minutes}.${seconds}`;
 
       const formattedStringElem = document.getElementById("formattedString");
@@ -159,14 +153,14 @@
     }
 
     // Listen for incoming data from the WebSocket server
-    socket.on("updateServerData", (data) => {
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
       // Check if the timecode has changed
       if (data.timecode !== previousTimecode) {
-        // If the timecode has changed, update the UI with new data
         lastDataReceivedTime = Date.now();  // Update last received time
         previousTimecode = data.timecode;   // Update the last timecode
 
-        // Display the received timecode and ensure it uses the default color
         const formattedStringElem = document.getElementById("formattedString");
         formattedStringElem.textContent = `${data.timecode}`;
         formattedStringElem.classList.remove("system-time"); // Remove blue class for timecode
@@ -177,16 +171,14 @@
         // Restart the timeout for checking inactivity
         startDataTimeout();
       }
-    });
+    };
 
-    // Continuously check every second if the timecode has not changed for 2 seconds
     setInterval(function () {
       if (Date.now() - lastDataReceivedTime >= 2000) {
         showSystemTime();
       }
     }, 40);
   </script>
-
 </body>
 
 </html>
