@@ -1,109 +1,192 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>WebSocket Variable Stream</title>
-    <style>
-      @font-face {
-        font-family: "DSEG7-Classic-MINI";
-        src: url("fonts/DSEG7ClassicMini-BoldItalic.ttf") format("truetype");
-        font-weight: bold;
-        font-style: italic;
-      }
-      body {
-        margin: 0;
-        padding: 0;
-        display: flex;
-        flex-direction: column; /* Stack items vertically */
-        background-color: #000000;
-      }
-      table {
-        width: 100%;
-        border-collapse: seperate;
-      }
-      tr,
-      td {
-        padding-top: 10px;
-        padding-bottom: 10px;
-      }
 
-      .container {
-        position: relative;
-        width: 100%;
-        height: 100%;
-      }
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebSocket Variable Stream</title>
+  <style>
+    @font-face {
+      font-family: "DSEG7-Classic-MINI";
+      src: url("fonts/DSEG7ClassicMini-BoldItalic.ttf") format("truetype");
+      font-weight: bold;
+      font-style: italic;
+    }
 
-      .base,
-      .dataDisplay {
-        padding-top: 184px;
-        position: absolute;
-        width: 100%;
-        font-family: "DSEG7-Classic-MINI";
-        color: rgb(188, 199, 204);
-        text-align: center;
-      }
-      .timecode {
-        font-size: 96px;
-      }
+    body {
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      /* Stack items vertically */
+      background-color: #000000;
+    }
 
-      .info {
-        font-size: 32px;
-      }
+    table {
+      width: 60%;
+      border-collapse: separate;
+      margin-left: auto;
+      margin-right: auto;
+    }
 
-      .base {
-        opacity: 0.05;
-      }
+    tr,
+    td {
+      padding-top: 10px;
+      padding-bottom: 10px;
+    }
 
-      .dataDisplay {
-        z-index: 1;
-      }
-      .fps {
-        text-align: right;
-        width: 25%;
-      }
-      .df {
-        text-align: left;
-        width: 75%;
-      }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <div class="base">
-        <table>
-          <tr class="timecode">
-            <td colspan="2">88.88.88.88</td>
-          </tr>
-          <tr class="info">
-            <td class="fps"></td>
-            <td class="df"></td>
-          </tr>
-        </table>
-      </div>
-      <div class="dataDisplay">
-        <table>
-          <tr class="timecode">
-            <td colspan="2" id="formattedString"></td>
-          </tr>
-          <tr class="info">
-            <td class="fps" id="fps"></td>
-            <td id="df" class="df"></td>
-          </tr>
-        </table>
-      </div>
+    .container {
+      position: relative;
+      width: 100%;
+      height: 100%;
+    }
+
+    .base,
+    .dataDisplay {
+      padding-top: 350px;
+      position: absolute;
+      width: 100%;
+      font-family: "DSEG7-Classic-MINI";
+      color: rgb(188, 199, 204);
+      /* Default color for timecode */
+      text-align: centre;
+    }
+
+    .timecode {
+      font-size: 256px;
+    }
+
+    .info {
+      font-size: 72px;
+    }
+
+    .base {
+      opacity: 0.05;
+    }
+
+    .dataDisplay {
+      z-index: 1;
+    }
+
+    .fps {
+      text-align: right;
+      width: 85%;
+    }
+
+    .df {
+      text-align: left;
+      width: 15%;
+    }
+
+    /* Add a transition for smooth color fade */
+    #formattedString {
+      transition: color 1s ease;
+      /* 1-second fade effect */
+    }
+
+    /* System time color */
+    .system-time {
+      color: blue !important;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div class="base">
+      <table>
+        <tr class="timecode">
+          <td colspan="2">88.88.88.88</td>
+        </tr>
+        <tr class="info">
+          <td class="fps"></td>
+          <td class="df"></td>
+        </tr>
+      </table>
     </div>
-    <script src="/socket.io.min.js"></script>
-    <script>
-      const socket = io();
-      let previousTimecode = null;
+    <div class="dataDisplay">
+      <table>
+        <tr class="timecode">
+          <td colspan="2" id="formattedString"></td>
+        </tr>
+        <tr class="info">
+          <td class="fps" id="fps"></td>
+          <td id="df" class="df"></td>
+        </tr>
+      </table>
+    </div>
+  </div>
+  <script src="/socket.io.min.js"></script>
+  <script>
+    const socket = io();
+    let previousTimecode = null;  // Track the last received timecode
+    let lastDataReceivedTime = Date.now();  // Track the time of the last update
+    let dataTimeout;
 
-      socket.on("updateServerData", (data) => {
-        document.getElementById("formattedString").textContent =
-          `${data.timecode}`;
+    // Function to show the current system time
+    function showSystemTime() {
+      const now = new Date();
+
+      const hours = now.getHours().toString().padStart(2, '0');
+      const minutes = now.getMinutes().toString().padStart(2, '0');
+      const seconds = now.getSeconds().toString().padStart(2, '0');
+      const milliseconds = now.getMilliseconds();
+
+      // Divide milliseconds by 40 and floor it to get the 'ff' value
+      // const ff = Math.floor(milliseconds / 40).toString().padStart(2, '0');
+
+      // const timeString = `${hours}.${minutes}.${seconds}.${ff}`;
+      const timeString = `${hours}.${minutes}.${seconds}`;
+
+      const formattedStringElem = document.getElementById("formattedString");
+      formattedStringElem.textContent = `${timeString}`;
+
+      // Apply the blue color to the system time
+      formattedStringElem.classList.add("system-time");
+
+      document.getElementById("df").textContent = "";
+      document.getElementById("fps").textContent = "";
+    }
+
+    // Function to start or restart the 2-second timeout
+    function startDataTimeout() {
+      clearTimeout(dataTimeout);
+      dataTimeout = setTimeout(function () {
+        if (Date.now() - lastDataReceivedTime >= 2000) {
+          showSystemTime();
+        }
+      }, 2000);
+    }
+
+    // Listen for incoming data from the WebSocket server
+    socket.on("updateServerData", (data) => {
+      // Check if the timecode has changed
+      if (data.timecode !== previousTimecode) {
+        // If the timecode has changed, update the UI with new data
+        lastDataReceivedTime = Date.now();  // Update last received time
+        previousTimecode = data.timecode;   // Update the last timecode
+
+        // Display the received timecode and ensure it uses the default color
+        const formattedStringElem = document.getElementById("formattedString");
+        formattedStringElem.textContent = `${data.timecode}`;
+        formattedStringElem.classList.remove("system-time"); // Remove blue class for timecode
+
         document.getElementById("df").textContent = `${data.dropFrame}`;
         document.getElementById("fps").textContent = `${data.fps}`;
-      });
-    </script>
-  </body>
+
+        // Restart the timeout for checking inactivity
+        startDataTimeout();
+      }
+    });
+
+    // Continuously check every second if the timecode has not changed for 2 seconds
+    setInterval(function () {
+      if (Date.now() - lastDataReceivedTime >= 2000) {
+        showSystemTime();
+      }
+    }, 40);
+  </script>
+
+</body>
+
 </html>
