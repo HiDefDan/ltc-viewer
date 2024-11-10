@@ -20,8 +20,8 @@
     "websocket": "^1.0.35"
   },
   "engines": {
-    "npm": "~9",
-    "node": "~19"
+    "npm": "~10",
+    "node": "~23"
   },
   "devDependencies": {
     "prettier": "3.2.4"

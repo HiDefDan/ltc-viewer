@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>WebSocket Variable Stream</title>
+  <title>gpio-bus.dev LTC viewer</title>
   <style>
     @font-face {
       font-family: "DSEG7-Classic-MINI";
@@ -18,7 +18,6 @@
       padding: 0;
       display: flex;
       flex-direction: column;
-      /* Stack items vertically */
       background-color: #000000;
     }
 
@@ -47,13 +46,12 @@
       position: absolute;
       width: 100%;
       font-family: "DSEG7-Classic-MINI";
-      color: rgb(189, 23, 51);
-      /* Default color for timecode */
-      text-align: centre;
+      text-align: center;
     }
 
     .timecode {
       font-size: 256px;
+      color: red; /* Default color for timecode */
     }
 
     .info {
@@ -61,7 +59,8 @@
     }
 
     .base {
-      opacity: 0.05;
+      opacity: 0.15;
+      filter: blur(5px); /* Apply slight blur */
     }
 
     .dataDisplay {
@@ -78,15 +77,17 @@
       width: 15%;
     }
 
-    /* Add a transition for smooth color fade */
-    #formattedString {
-      transition: color 1s ease;
-      /* 1-second fade effect */
+    /* Color styles */
+    .pale-blue-gray {
+      color: #102744; /* Very pale blue-gray for holder */
     }
 
-    /* System time color */
     .system-time {
-      color: rgb(23, 199, 76) !important;
+      color: rgb(23, 199, 76); /* Blue color for system time */
+    }
+
+    .timecode-red {
+      color: rgb(189, 23, 51); /* Red for timecode */
     }
   </style>
 </head>
@@ -95,7 +96,7 @@
   <div class="container">
     <div class="base">
       <table>
-        <tr class="timecode">
+        <tr class="timecode pale-blue-gray">
           <td colspan="2">88.88.88.88</td>
         </tr>
         <tr class="info">
@@ -106,7 +107,7 @@
     </div>
     <div class="dataDisplay">
       <table>
-        <tr class="timecode">
+        <tr class="timecode timecode-red">
           <td colspan="2" id="formattedString"></td>
         </tr>
         <tr class="info">
@@ -121,6 +122,9 @@
     let previousTimecode = null;  // Track the last received timecode
     let lastDataReceivedTime = Date.now();  // Track the time of the last update
     let dataTimeout;
+
+    const throttleInterval = 30; // Set throttle interval to 100 ms (10 times per second)
+    let lastUpdateTime = 0;
 
     // Function to show the current system time
     function showSystemTime() {
@@ -152,25 +156,39 @@
       }, 2000);
     }
 
+    // Throttled function to update data from WebSocket
+    function updateData(data) {
+      const currentTime = Date.now();
+      if (currentTime - lastUpdateTime >= throttleInterval) {
+        lastUpdateTime = currentTime;
+
+        // If there's no timecode value, show system time
+        if (!data.timecode) {
+          showSystemTime();
+        } else {
+          // Check if the timecode has changed
+          if (data.timecode !== previousTimecode) {
+            lastDataReceivedTime = Date.now();  // Update last received time
+            previousTimecode = data.timecode;   // Update the last timecode
+
+            const formattedStringElem = document.getElementById("formattedString");
+            formattedStringElem.textContent = `${data.timecode}`;
+            formattedStringElem.classList.remove("system-time"); // Remove blue class for timecode
+
+            document.getElementById("df").textContent = data.drop_frame_format ? "df" : "";
+            document.getElementById("fps").textContent = `${data.fps}`;
+
+            // Restart the timeout for checking inactivity
+            startDataTimeout();
+          }
+        }
+      }
+    }
+
     // Listen for incoming data from the WebSocket server
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
-
-      // Check if the timecode has changed
-      if (data.timecode !== previousTimecode) {
-        lastDataReceivedTime = Date.now();  // Update last received time
-        previousTimecode = data.timecode;   // Update the last timecode
-
-        const formattedStringElem = document.getElementById("formattedString");
-        formattedStringElem.textContent = `${data.timecode}`;
-        formattedStringElem.classList.remove("system-time"); // Remove blue class for timecode
-
-        document.getElementById("df").textContent = `${data.dropFrame}`;
-        document.getElementById("fps").textContent = `${data.fps}`;
-
-        // Restart the timeout for checking inactivity
-        startDataTimeout();
-      }
+      updateData(data); // Use throttled function
     };
 
     setInterval(function () {
