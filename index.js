@@ -102,15 +102,15 @@ rtAudio.openStream(
   { flags: RtAudioStreamFlags.RTAUDIO_MINIMIZE_LATENCY },
 );
 
-function getValueCategory(value) {
-  // console.log(value);
-  if (value >= 1999 && value <= 2001) return "23.976";
-  if (value >= 1997 && value <= 1998) return "24";
-  if (value >= 1917 && value <= 1918) return "25";
-  if (value >= 1599 && value <= 1600) return "29.97";
-  if (value >= 1598 && value <= 1599) return "30";
-  return "";
-}
+// function getValueCategory(value) {
+//   // console.log(value);
+//   if (value >= 1999 && value <= 2001) return "23.976";
+//   if (value >= 1997 && value <= 1998) return "24";
+//   if (value >= 1917 && value <= 1918) return "25";
+//   if (value >= 1599 && value <= 1600) return "29.97";
+//   if (value >= 1598 && value <= 1599) return "30";
+//   return "";
+// }
 
 setTimeout(() => {
   try {
