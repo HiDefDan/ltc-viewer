@@ -11,9 +11,13 @@ const decoder = new LTCDecoder(48000, 30, "s16"); // 48khz, 30 fps, signed 16 bi
 
 const app = express();
 const server = http.createServer(app);
-const wseconds = new WebSocket.Server({ server });
+const ws = new WebSocket.Server({ server });
 
 const frameSize = 1;
+
+// Variable to track when the offset changes
+let lastOffsetChangeTime = Date.now(); // Store the last time offset_start changed
+let lastOffsetStart = null; // Store the last value of offset_start
 
 class FramerateCalculator {
   constructor(sampleRate) {
@@ -65,7 +69,8 @@ class FramerateCalculator {
 }
 
 const framerateCalculator = new FramerateCalculator(48000);
-
+let lastFrameTime = Date.now(); // Track the last time we received a valid frame
+let lastLoggedTime = Date.now();
 rtAudio.openStream(
   null,
   { deviceId: 129, nChannels: 1, firstChannel: 0 },
@@ -74,44 +79,58 @@ rtAudio.openStream(
   frameSize,
   "LTC",
   (pcm) => {
-    decoder.write(pcm);
-    let frame = decoder.read();
-    if (frame !== undefined) {
-      // console.log(frame);
+    try {
+      decoder.write(pcm);
+      let frame = decoder.read();
 
-      framerateCalculator.update(frame.offset_start);
-      const currentFramerate = Math.round(framerateCalculator.getFramerate());
+      if (frame !== undefined) {
+        // Reset the lastFrameTime when a valid frame is received
+        lastFrameTime = Date.now();
+        console.log(`last frame receioved at ${lastFrameTime}`);
 
-      // Update server data
-      ltc.days = frame.days;
-      ltc.months = frame.months;
-      ltc.years = frame.years;
-      ltc.drop_frame_format = frame.drop_frame_format;
-      ltc.hours = `${String(frame.hours).padStart(2, "0")}`;
-      ltc.minutes = `${String(frame.minutes).padStart(2, "0")}`;
-      ltc.seconds = `${String(frame.seconds).padStart(2, "0")}`;
-      ltc.frames = `${String(frame.frames).padStart(2, "0")}`;
-      ltc.timecode = `${String(frame.hours).padStart(2, "0")}.${String(frame.minutes).padStart(2, "0")}.${String(frame.seconds).padStart(2, "0")}.${String(frame.frames).padStart(2, "0")}`;
-      ltc.offset_start = frame.offset_start;
-      ltc.reverse = frame.reverse;
-      ltc.volume = frame.volume;
-      ltc.timezone = frame.timezone;
-      ltc.fps = currentFramerate ? currentFramerate : "";
+        framerateCalculator.update(frame.offset_start);
+        const currentFramerate = Math.round(framerateCalculator.getFramerate());
+
+        // Check if more than 2 seconds have passed since the last log
+        // const currentTime = Date.now();
+        // if (currentTime - lastLoggedTime > 2000) {
+        //   // 2000 ms = 2 seconds
+        //   console.log(`${currentTime} ${currentFramerate}`);
+        //   lastLoggedTime = currentTime; // Update the last logged time
+        // }
+
+        // Update server data
+        ltc.days = frame.days;
+        ltc.months = frame.months;
+        ltc.years = frame.years;
+        ltc.drop_frame_format = frame.drop_frame_format;
+        ltc.hours = `${String(frame.hours).padStart(2, "0")}`;
+        ltc.minutes = `${String(frame.minutes).padStart(2, "0")}`;
+        ltc.seconds = `${String(frame.seconds).padStart(2, "0")}`;
+        ltc.frames = `${String(frame.frames).padStart(2, "0")}`;
+        ltc.timecode = `${String(frame.hours).padStart(2, "0")}.${String(frame.minutes).padStart(2, "0")}.${String(frame.seconds).padStart(2, "0")}.${String(frame.frames).padStart(2, "0")}`;
+        ltc.offset_start = frame.offset_start;
+        ltc.reverse = frame.reverse;
+        ltc.volume = frame.volume;
+        ltc.timezone = frame.timezone;
+        ltc.fps = currentFramerate ? currentFramerate : "";
+        ltc.active = true;
+      } else {
+        // If frame is undefined, check how long it's been
+        const currentTime = Date.now();
+        if (currentTime - lastFrameTime > 100) {
+          // If more than 2 seconds have passed since the last frame
+          ltc.active = false;
+          console.log(`last frame receioved at ${lastFrameTime}`);
+        }
+      }
+    } catch (error) {
+      console.error("Error processing frame:", error);
     }
   },
   { flags: RtAudioStreamFlags.RTAUDIO_MINIMIZE_LATENCY },
 );
-
-// function getValueCategory(value) {
-//   // console.log(value);
-//   if (value >= 1999 && value <= 2001) return "23.976";
-//   if (value >= 1997 && value <= 1998) return "24";
-//   if (value >= 1917 && value <= 1918) return "25";
-//   if (value >= 1599 && value <= 1600) return "29.97";
-//   if (value >= 1598 && value <= 1599) return "30";
-//   return "";
-// }
-
+// Set a timeout to continue working
 setTimeout(() => {
   try {
     rtAudio.write(null);
@@ -133,16 +152,17 @@ let ltc = {
   days: "",
   months: "",
   years: "",
-  timecode: "",
-  hours: "",
-  minutes: "",
-  seconds: "",
-  frames: "",
+  timecode: "00:00:00:00",
+  hours: "00",
+  minutes: "00",
+  seconds: "00",
+  frames: "00",
   offset_start: "",
   reverse: "",
   volume: "",
   timezone: "",
   fps: "",
+  active: "",
 };
 
 rtAudio.start();
@@ -150,7 +170,7 @@ rtAudio.start();
 // Broadcast server data to all connected clients
 function broadcastData() {
   const data = JSON.stringify(ltc);
-  wseconds.clients.forEach((client) => {
+  ws.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(data);
     }
@@ -160,7 +180,7 @@ function broadcastData() {
 // Update and broadcast the data at regular intervals
 setInterval(broadcastData, 30);
 
-wseconds.on("connection", (ws) => {
+ws.on("connection", (ws) => {
   // console.log("Client connected");
 
   // Send initial data to the newly connected client
