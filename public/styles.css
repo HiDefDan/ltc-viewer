@@ -1,0 +1,119 @@
+:root {
+    --timecode-red-color: rgb(189, 23, 51);
+  }
+  
+  @font-face {
+    font-family: "DSEG7-Classic-MINI";
+    src: url("fonts/DSEG7ClassicMini-BoldItalic.eot");
+    src: url("fonts/DSEG7ClassicMini-BoldItalic.eot?#iefix") format("embedded-opentype"),
+      url("fonts/DSEG7ClassicMini-BoldItalic.woff2") format("woff2"),
+      url("fonts/DSEG7ClassicMini-BoldItalic.woff") format("woff"),
+      url("fonts/DSEG7ClassicMini-BoldItalic.ttf") format("truetype");
+    font-weight: bold;
+    font-style: italic;
+  }
+  
+  body {
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    background-color: #000000;
+  }
+  
+  .container {
+    position: relative;
+    width: 80%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: auto;
+  }
+  
+  .base {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 0;
+    opacity: 0.075;
+    color: #102744;
+    font-family: "DSEG7-Classic-MINI";
+    font-size: calc(13.3vw);
+    line-height: 1;
+    text-align: center;
+    white-space: nowrap;
+  }
+  
+  .dataDisplay {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1;
+    font-family: "DSEG7-Classic-MINI";
+    text-align: center;
+    background-color: transparent;
+    white-space: nowrap;
+  }
+  
+  .timecode {
+    line-height: 1;
+    font-size: calc(13.3vw);
+    color: var(--timecode-red-color);
+  }
+  
+  .info {
+    line-height: 1;
+    font-size: calc(3.75vw);
+    color: var(--timecode-red-color);
+    padding-top: 20px;
+    min-height: 50px;
+    text-align: center;
+  }
+  
+  .fps,
+  .df {
+    line-height: 1;
+    font-size: calc(3.75vw);
+    display: inline-block;
+    padding-top: 25px;
+  }
+  
+  .fps {
+    width: 75%;
+    text-align: right;
+  }
+  
+  .df {
+    width: 25%;
+    text-align: left;
+  }
+  
+  .data-members {
+    position: absolute;
+    top: 2.5%;
+    left: 2.5%;
+    z-index: 9999;
+    font-size: 18px;
+    font-family: monospace;
+    color: yellow;
+    background-color: transparent;
+    padding: 10px;
+    max-width: 90%;
+    overflow-wrap: break-word;
+    overflow-y: auto;
+    max-height: 90vh;
+    display: none;
+  }
+  
+  .system-time {
+    line-height: 1;
+    color: rgb(23, 199, 76);
+    transition: color 2s ease;
+    /* transition: none; */
+  }

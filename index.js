@@ -84,51 +84,45 @@ rtAudio.openStream(
       let frame = decoder.read();
 
       if (frame !== undefined) {
+        // console.log(frame);
         // Reset the lastFrameTime when a valid frame is received
         lastFrameTime = Date.now();
-        console.log(`last frame receioved at ${lastFrameTime}`);
 
         framerateCalculator.update(frame.offset_start);
         const currentFramerate = Math.round(framerateCalculator.getFramerate());
-
-        // Check if more than 2 seconds have passed since the last log
-        // const currentTime = Date.now();
-        // if (currentTime - lastLoggedTime > 2000) {
-        //   // 2000 ms = 2 seconds
-        //   console.log(`${currentTime} ${currentFramerate}`);
-        //   lastLoggedTime = currentTime; // Update the last logged time
-        // }
 
         // Update server data
         ltc.days = frame.days;
         ltc.months = frame.months;
         ltc.years = frame.years;
         ltc.drop_frame_format = frame.drop_frame_format;
-        ltc.hours = `${String(frame.hours).padStart(2, "0")}`;
-        ltc.minutes = `${String(frame.minutes).padStart(2, "0")}`;
-        ltc.seconds = `${String(frame.seconds).padStart(2, "0")}`;
-        ltc.frames = `${String(frame.frames).padStart(2, "0")}`;
-        ltc.timecode = `${String(frame.hours).padStart(2, "0")}.${String(frame.minutes).padStart(2, "0")}.${String(frame.seconds).padStart(2, "0")}.${String(frame.frames).padStart(2, "0")}`;
+        ltc.hours = frame.hours;
+        ltc.minutes = frame.minutes;
+        ltc.seconds = frame.seconds;
+        ltc.frames = frame.frames;
         ltc.offset_start = frame.offset_start;
         ltc.reverse = frame.reverse;
         ltc.volume = frame.volume;
         ltc.timezone = frame.timezone;
         ltc.fps = currentFramerate ? currentFramerate : "";
-        ltc.active = true;
+        ltc.running = true;
       } else {
         // If frame is undefined, check how long it's been
         const currentTime = Date.now();
         if (currentTime - lastFrameTime > 100) {
-          // If more than 2 seconds have passed since the last frame
-          ltc.active = false;
-          console.log(`last frame receioved at ${lastFrameTime}`);
+          // If more than 100ms have passed since the last frame
+          ltc.running = false;
         }
       }
     } catch (error) {
       console.error("Error processing frame:", error);
     }
   },
-  { flags: RtAudioStreamFlags.RTAUDIO_MINIMIZE_LATENCY },
+  {
+    flags:
+      RtAudioStreamFlags.RTAUDIO_SCHEDULE_REALTIME &
+      RtAudioStreamFlags.RTAUDIO_MINIMIZE_LATENCY,
+  },
 );
 // Set a timeout to continue working
 setTimeout(() => {
@@ -146,23 +140,27 @@ app.get("/", (req, res) => {
   res.sendFile(__dirname + "/public/index.html");
 });
 
+app.get("/displays", (req, res) => {
+  res.sendFile(__dirname + "/public/displays.html");
+});
 // Define a variable to send to the client
 let ltc = {
   drop_frame_format: "",
   days: "",
   months: "",
   years: "",
-  timecode: "00:00:00:00",
-  hours: "00",
-  minutes: "00",
-  seconds: "00",
-  frames: "00",
+  timecode: "",
+  hours: "",
+  minutes: "",
+  seconds: "",
+  frames: "",
   offset_start: "",
   reverse: "",
   volume: "",
   timezone: "",
   fps: "",
-  active: "",
+  running: "",
+  debug: false,
 };
 
 rtAudio.start();
@@ -185,6 +183,29 @@ ws.on("connection", (ws) => {
 
   // Send initial data to the newly connected client
   ws.send(JSON.stringify(ltc));
+
+  ws.on("message", (message) => {
+    try {
+      // Try to parse the message as JSON
+      const parsedMessage = JSON.parse(message.toString());
+
+      // If JSON is valid, log the parsed object
+      console.log("Received valid JSON:", parsedMessage);
+
+      // Optionally, send a response back
+      // ws.send("Server received valid JSON.");
+      if (parsedMessage.hasOwnProperty("debug")) {
+        // console.log(parsedMessage.debug);
+        ltc.debug = parsedMessage.debug;
+      }
+    } catch (error) {
+      // If JSON is invalid, log the raw message as a string
+      console.log("Received non-JSON message:", message.toString());
+
+      // Optionally, send a response back for non-JSON
+      // ws.send("Server received non-JSON message.");
+    }
+  });
 
   ws.on("close", () => {
     // console.log("Client disconnected");
