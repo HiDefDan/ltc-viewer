@@ -2,6 +2,9 @@
   --timecode-red-color: rgb(189, 23, 51);
 }
 
+/* Import JetBrains Mono from Google Fonts */
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap");
+
 @font-face {
   font-family: "DSEG7-Classic-MINI";
   src: url("fonts/DSEG7ClassicMini-BoldItalic.eot");
@@ -15,7 +18,7 @@
 }
 
 body {
-  font-family: "DSEG7-Classic-MINI", "Courier New", Courier, monospace; /* Base font */
+  font-family: "JetBrains Mono", "DSEG7-Classic-MINI", monospace; /* Base font */
   margin: 0;
   padding: 0;
   display: flex;

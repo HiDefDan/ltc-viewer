@@ -13,8 +13,10 @@ ws.onmessage = (event) => {
 
   if (ltc.running) {
     displayLTC();
+
+    console.log(updateFrameRate(ltc));
     clearSystemTime(); // Stop showing the system time
-  } else if (ltc.hold > 0 || firstRun) { 
+  } else if (ltc.hold > 0 || firstRun) {
     // Only show system time if `ltc.hold` is greater than 0 or it’s the first run
     const systemTimeDisplayDelay = firstRun ? 0 : ltc.hold * 1000;
     setTimeout(showSystemTime, systemTimeDisplayDelay);
@@ -84,4 +86,33 @@ function updateDebugDiv(data) {
     line.textContent = `${key}: ${value}`;
     dataMembersDiv.appendChild(line);
   });
+}
+
+function updateFrameRate(ltc) {
+  // Initialize or reset the rolling array to track up to 60 frames
+  if (!ltc._frameHistory) ltc._frameHistory = [];
+
+  // Add the current frame to the history
+  ltc._frameHistory.push(ltc.frames);
+
+  // Limit history to 60 frames (so we can check max after 60 frames)
+  if (ltc._frameHistory.length > 30) {
+    ltc._frameHistory.shift(); // Remove the oldest frame when we have more than 60
+  }
+
+  // After 60 frames, calculate the max value and return max + 1 (if valid)
+  if (ltc._frameHistory.length === 30) {
+    const maxFrame = Math.max(...ltc._frameHistory);
+    let calculatedFrameRate = maxFrame + 1;
+
+    // Only return valid frame rates: 24, 25, or 30
+    if (calculatedFrameRate === 24 || calculatedFrameRate === 25 || calculatedFrameRate === 30) {
+      ltc.frame_rate = calculatedFrameRate;
+    } else {
+      // Return 30 if the calculated frame rate is not 24, 25, or 30
+      ltc.frame_rate = null;
+    }
+  }
+
+  return ltc.frame_rate;
 }

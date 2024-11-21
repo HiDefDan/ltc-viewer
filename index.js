@@ -99,8 +99,8 @@ rtAudio.openStream(
         // Reset the lastFrameTime when a valid frame is received
         lastFrameTime = Date.now();
 
-        framerateCalculator.update(frame.offset_start);
-        const currentFramerate = Math.round(framerateCalculator.getFramerate());
+        // framerateCalculator.update(frame.offset_start);
+        // const currentFramerate = Math.round(framerateCalculator.getFramerate());
 
         // Update server data
         ltc.days = frame.days;
@@ -115,7 +115,7 @@ rtAudio.openStream(
         ltc.reverse = frame.reverse;
         ltc.volume = frame.volume;
         ltc.timezone = frame.timezone;
-        ltc.fps = currentFramerate ? currentFramerate : "";
+        // ltc.fps = currentFramerate ? currentFramerate : "";
         ltc.running = true;
       } else {
         // If frame is undefined, check how long it's been
@@ -161,7 +161,7 @@ let ltc = {
   reverse: "",
   volume: "",
   timezone: "",
-  fps: "",
+  // frame_rate: null,
   running: "",
   debug: false,
   hold: 3,
