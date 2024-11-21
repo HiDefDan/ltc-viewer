@@ -1,119 +1,87 @@
 const ws = new WebSocket("ws://" + window.location.host);
-let inactiveSince = null;
-const systemTimeWaitPeriod = 3;
+let ltc = { running: false }; // Default `ltc` state
+let firstRun = true;
+let systemTimeInterval = null;
 
+// WebSocket message handling
 ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  updateData(data);
+  const changes = JSON.parse(event.data);
+  Object.assign(ltc, changes);
+
+  updateDebugDiv(ltc);
+  toggleDebugDiv(ltc);
+
+  if (ltc.running) {
+    displayLTC();
+    clearSystemTime(); // Stop showing the system time
+  } else if (ltc.hold > 0 || firstRun) { 
+    // Only show system time if `ltc.hold` is greater than 0 or it’s the first run
+    const systemTimeDisplayDelay = firstRun ? 0 : ltc.hold * 1000;
+    setTimeout(showSystemTime, systemTimeDisplayDelay);
+    firstRun = false; // Set `firstRun` to false after the first run
+  }
 };
 
-// function to return system time as formatted string
+// Display the LTC time
+function displayLTC() {
+  const timeStringElem = document.getElementById("timeString");
+  if (!timeStringElem) return; // Exit if element doesn't exist
 
-function getSystemTime() {
-  const now = new Date();
-
-  const hours = now.getHours().toString().padStart(2, "0");
-  const minutes = now.getMinutes().toString().padStart(2, "0");
-  const seconds = now.getSeconds().toString().padStart(2, "0");
-
-  const timeString = `${hours}.${minutes}.${seconds}`;
-  return timeString;
+  timeStringElem.textContent = `${ltc.hours?.toString().padStart(2, "0") || "00"}.${
+    ltc.minutes?.toString().padStart(2, "0") || "00"
+  }.${ltc.seconds?.toString().padStart(2, "0") || "00"}.${
+    ltc.frames?.toString().padStart(2, "0") || "00"
+  }`;
+  timeStringElem.className = ""; // Remove any specific styles
 }
-// Function to show the current system time
+
 function showSystemTime() {
-  const formattedStringElem = document.getElementById("formattedString");
-  formattedStringElem.textContent = getSystemTime();
-  formattedStringElem.className = "system-time";
+  const timeStringElem = document.getElementById("timeString");
+  if (!timeStringElem) return; // Exit if the element doesn't exist
 
-  // Set the color of all elements with class 'info' to transparent
-  const infoElements = document.querySelectorAll(".info");
-  infoElements.forEach((elem) => {
-    elem.style.color = "transparent";
-  });
+  const update = () => {
+    const now = new Date();
+    timeStringElem.textContent = `${now.getHours().toString().padStart(2, "0")}.${now
+      .getMinutes()
+      .toString()
+      .padStart(2, "0")}.${now.getSeconds().toString().padStart(2, "0")}`;
+    timeStringElem.className = "system-time"; // Add a class for styling
+  };
+
+  if (!systemTimeInterval) {
+    update(); // Immediate update
+    systemTimeInterval = setInterval(update, 1000); // Update every second
+  }
 }
 
-function updateDataMembers(data) {
-  // Ensure the function only runs on the intended page
-  if (window.location.pathname !== "/") {
-    return; // Exit if not the target page
+// Clear the system time interval
+function clearSystemTime() {
+  if (systemTimeInterval) {
+    clearInterval(systemTimeInterval); // Stop the interval
+    systemTimeInterval = null; // Reset the interval variable
   }
+}
+
+// Function to hide or show the debug div based on `ltc.debug` value
+function toggleDebugDiv(data) {
+  // Ensure the function only runs on the intended page
+  if (window.location.pathname !== "/") return;
+
+  const debugDiv = document.getElementById("dataMembers");
+  debugDiv.style.display = ltc.debug ? "block" : "none";
+}
+
+// Function to update the debug div content
+function updateDebugDiv(data) {
+  // Ensure the function only runs on the intended page
+  if (window.location.pathname !== "/") return;
 
   const dataMembersDiv = document.getElementById("dataMembers");
   dataMembersDiv.innerHTML = ""; // Clear previous data
 
   Object.entries(data).forEach(([key, value]) => {
-    // Skip the keys 'timecode', 'running', and 'debug'
-    if (key === "running" || key === "debug") {
-      return; // Skip this iteration
-    }
     const line = document.createElement("div");
     line.textContent = `${key}: ${value}`;
     dataMembersDiv.appendChild(line);
   });
-}
-
-function updateData(data) {
-  // Update data members
-  updateDataMembers(data);
-
-  if (!data.running) {
-    if (inactiveSince === null) {
-      inactiveSince = Date.now();
-      if (performance.navigation.type === performance.navigation.TYPE_RELOAD) {
-        const formattedStringElem = document.getElementById("formattedString");
-        formattedStringElem.style.transition = "none";
-      }
-    }
-  } else {
-    inactiveSince = null;
-  }
-
-  const inactiveDuration = getInactiveDuration();
-
-  if (inactiveDuration >= systemTimeWaitPeriod) {
-    showSystemTime();
-  }
-
-  toggleDebugDiv(data);
-
-  if (data.running) {
-    const formattedStringElem = document.getElementById("formattedString");
-    formattedStringElem.textContent = `${data.hours.toString().padStart(2, "0")}.${data.minutes.toString().padStart(2, "0")}.${data.seconds.toString().padStart(2, "0")}.${data.frames.toString().padStart(2, "0")}`;
-    formattedStringElem.className = "";
-
-    const infoElements = document.querySelectorAll(".info");
-    infoElements.forEach((elem) => {
-      elem.style.color = "var(--timecode-red-color)";
-    });
-
-    document.getElementById("df").textContent = data.drop_frame_format
-      ? "df"
-      : "";
-    document.getElementById("fps").textContent = `${data.fps}`;
-  }
-}
-
-function getInactiveDuration() {
-  if (inactiveSince === null) {
-    return 0;
-  }
-  return (Date.now() - inactiveSince) / 1000;
-}
-
-// Function to hide or show the div based on data.debug value
-function toggleDebugDiv(data) {
-  // Ensure the function only runs on the intended page
-  if (window.location.pathname !== "/") {
-    return; // Exit if not the target page
-  }
-
-  const debugDiv = document.getElementById("dataMembers");
-
-  if (!data.debug) {
-    // Hide the div if debug is false
-    debugDiv.style.display = "none";
-  } else {
-    // Show the div if debug is true
-    debugDiv.style.display = "block";
-  }
 }

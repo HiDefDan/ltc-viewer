@@ -15,6 +15,17 @@ const ws = new WebSocket.Server({ server });
 
 const frameSize = 1;
 
+// Serve static files from the 'public' directory
+app.use(express.static(path.join(__dirname, "public")));
+
+app.get("/", (req, res) => {
+  res.sendFile(__dirname + "/public/index.html");
+});
+
+app.get("/displays", (req, res) => {
+  res.sendFile(__dirname + "/public/displays.html");
+});
+
 // Variable to track when the offset changes
 let lastOffsetChangeTime = Date.now(); // Store the last time offset_start changed
 let lastOffsetStart = null; // Store the last value of offset_start
@@ -133,23 +144,15 @@ setTimeout(() => {
   }
 });
 
-// Serve static files from the 'public' directory
-app.use(express.static(path.join(__dirname, "public")));
+rtAudio.start();
 
-app.get("/", (req, res) => {
-  res.sendFile(__dirname + "/public/index.html");
-});
-
-app.get("/displays", (req, res) => {
-  res.sendFile(__dirname + "/public/displays.html");
-});
 // Define a variable to send to the client
 let ltc = {
   drop_frame_format: "",
   days: "",
   months: "",
   years: "",
-  timecode: "",
+  // timecode: "",
   hours: "",
   minutes: "",
   seconds: "",
@@ -161,56 +164,63 @@ let ltc = {
   fps: "",
   running: "",
   debug: false,
+  hold: 3,
 };
 
-rtAudio.start();
+// Track the last state of ltc
+let lastState = { ...ltc };
 
 // Broadcast server data to all connected clients
 function broadcastData() {
-  const data = JSON.stringify(ltc);
-  ws.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(data);
+  const changes = {};
+
+  // Determine what has changed
+  for (const key in ltc) {
+    if (ltc[key] !== lastState[key]) {
+      changes[key] = ltc[key];
     }
-  });
+  }
+
+  // Update lastState with the current state
+  lastState = { ...ltc };
+
+  // Only send changes if there are any
+  if (Object.keys(changes).length > 0) {
+    const data = JSON.stringify(changes);
+
+    ws.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(data);
+      }
+    });
+  }
 }
 
-// Update and broadcast the data at regular intervals
-setInterval(broadcastData, 30);
+ws.on("connection", (client) => {
+  // Send the full state to the newly connected client
+  client.send(JSON.stringify(ltc));
 
-ws.on("connection", (ws) => {
-  // console.log("Client connected");
-
-  // Send initial data to the newly connected client
-  ws.send(JSON.stringify(ltc));
-
-  ws.on("message", (message) => {
+  client.on("message", (message) => {
     try {
-      // Try to parse the message as JSON
       const parsedMessage = JSON.parse(message.toString());
 
-      // If JSON is valid, log the parsed object
-      console.log("Received valid JSON:", parsedMessage);
-
-      // Optionally, send a response back
-      // ws.send("Server received valid JSON.");
       if (parsedMessage.hasOwnProperty("debug")) {
-        // console.log(parsedMessage.debug);
         ltc.debug = parsedMessage.debug;
+      } else if (parsedMessage.hasOwnProperty("hold")) {
+        ltc.hold = parsedMessage.hold;
       }
     } catch (error) {
-      // If JSON is invalid, log the raw message as a string
       console.log("Received non-JSON message:", message.toString());
-
-      // Optionally, send a response back for non-JSON
-      // ws.send("Server received non-JSON message.");
     }
   });
 
-  ws.on("close", () => {
-    // console.log("Client disconnected");
+  client.on("close", () => {
+    console.log("Client disconnected");
   });
 });
+
+// Update and broadcast data at regular intervals
+setInterval(broadcastData, 30);
 
 const port = 80;
 server.listen(port, () => {
