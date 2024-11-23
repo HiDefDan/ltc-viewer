@@ -116,13 +116,13 @@ rtAudio.openStream(
         ltc.volume = frame.volume;
         ltc.timezone = frame.timezone;
         // ltc.fps = currentFramerate ? currentFramerate : "";
-        ltc.running = true;
+        ltc._running = true;
       } else {
         // If frame is undefined, check how long it's been
         const currentTime = Date.now();
         if (currentTime - lastFrameTime > 100) {
           // If more than 100ms have passed since the last frame
-          ltc.running = false;
+          ltc._running = false;
         }
       }
     } catch (error) {
@@ -161,10 +161,10 @@ let ltc = {
   reverse: "",
   volume: "",
   timezone: "",
-  // frame_rate: null,
-  running: "",
-  debug: false,
-  hold: 3,
+  // _frame_rate: null,
+  _running: null,
+  // _debug: true,
+  // _hold: 3,
 };
 
 // Track the last state of ltc
@@ -204,10 +204,10 @@ ws.on("connection", (client) => {
     try {
       const parsedMessage = JSON.parse(message.toString());
 
-      if (parsedMessage.hasOwnProperty("debug")) {
-        ltc.debug = parsedMessage.debug;
-      } else if (parsedMessage.hasOwnProperty("hold")) {
-        ltc.hold = parsedMessage.hold;
+      if (parsedMessage.hasOwnProperty("_debug")) {
+        ltc._debug = parsedMessage._debug;
+      } else if (parsedMessage.hasOwnProperty("_hold")) {
+        ltc._hold = parsedMessage._hold;
       }
     } catch (error) {
       console.log("Received non-JSON message:", message.toString());
