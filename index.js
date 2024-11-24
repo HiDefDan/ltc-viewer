@@ -114,8 +114,6 @@ rtAudio.openStream(
         ltc.offset_start = frame.offset_start;
         ltc.reverse = frame.reverse;
         ltc.volume = frame.volume;
-        ltc.timezone = frame.timezone;
-        // ltc.fps = currentFramerate ? currentFramerate : "";
         ltc._running = true;
       } else {
         // If frame is undefined, check how long it's been
@@ -152,7 +150,6 @@ let ltc = {
   days: "",
   months: "",
   years: "",
-  // timecode: "",
   hours: "",
   minutes: "",
   seconds: "",
@@ -161,10 +158,6 @@ let ltc = {
   reverse: "",
   volume: "",
   timezone: "",
-  // _frame_rate: null,
-  _running: null,
-  // _debug: true,
-  // _hold: 3,
 };
 
 // Track the last state of ltc
@@ -208,9 +201,11 @@ ws.on("connection", (client) => {
         ltc._debug = parsedMessage._debug;
       } else if (parsedMessage.hasOwnProperty("_hold")) {
         ltc._hold = parsedMessage._hold;
+      }else if (parsedMessage.hasOwnProperty("_info")) {
+        ltc._info = parsedMessage._info;
       }
     } catch (error) {
-      console.log("Received non-JSON message:", message.toString());
+      client.send("Received non-JSON message:", message.toString());
     }
   });
 

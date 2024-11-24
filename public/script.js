@@ -1,5 +1,16 @@
 const ws = new WebSocket("ws://" + window.location.host);
-let ltc = { _running: false }; // Default `ltc` state
+
+// Default `ltc` state with explicit initialization
+let ltc = {
+  _running: false,
+  _debug: false,
+  _hold: 0,
+  _info: false,
+  frame_rate: null,
+  drop_frame_format: false,
+  _frame_history: [],
+};
+
 let firstRun = true;
 let systemTimeInterval = null;
 
@@ -12,34 +23,36 @@ ws.onmessage = (event) => {
   toggleDebugDiv(ltc);
 
   if (ltc._running) {
+    clearSystemTime();
     displayLTC();
-
-    // console.log(updateFrameRate(ltc));
-    clearSystemTime(); // Stop showing the system time
+    updateFrameRate(ltc);
   } else if (ltc._hold > 0 || firstRun) {
-    // Only show system time if `ltc._hold` is greater than 0 or it’s the first run
     const systemTimeDisplayDelay = firstRun ? 0 : ltc._hold * 1000;
     setTimeout(showSystemTime, systemTimeDisplayDelay);
-    firstRun = false; // Set `firstRun` to false after the first run
+    firstRun = false;
   }
+
+  // Update visibility of info display when _info is updated from the server
+  updateInfoDisplay();
 };
 
 // Display the LTC time
 function displayLTC() {
   const timeStringElem = document.getElementById("timeString");
-  if (!timeStringElem) return; // Exit if element doesn't exist
+  if (!timeStringElem) return;
 
   timeStringElem.textContent = `${ltc.hours?.toString().padStart(2, "0") || "00"}.${
     ltc.minutes?.toString().padStart(2, "0") || "00"
   }.${ltc.seconds?.toString().padStart(2, "0") || "00"}.${
     ltc.frames?.toString().padStart(2, "0") || "00"
   }`;
-  timeStringElem.className = ""; // Remove any specific styles
+  timeStringElem.className = "";
 }
 
+// Show system time
 function showSystemTime() {
   const timeStringElem = document.getElementById("timeString");
-  if (!timeStringElem) return; // Exit if the element doesn't exist
+  if (!timeStringElem) return;
 
   const update = () => {
     const now = new Date();
@@ -47,40 +60,37 @@ function showSystemTime() {
       .getMinutes()
       .toString()
       .padStart(2, "0")}.${now.getSeconds().toString().padStart(2, "0")}`;
-    timeStringElem.className = "system-time"; // Add a class for styling
+    timeStringElem.className = "system-time";
   };
 
   if (!systemTimeInterval) {
-    update(); // Immediate update
-    systemTimeInterval = setInterval(update, 1000); // Update every second
+    update();
+    systemTimeInterval = setInterval(update, 1000);
   }
 }
 
-// Clear the system time interval
+// Clear system time interval
 function clearSystemTime() {
   if (systemTimeInterval) {
-    clearInterval(systemTimeInterval); // Stop the interval
-    systemTimeInterval = null; // Reset the interval variable
+    clearInterval(systemTimeInterval);
+    systemTimeInterval = null;
   }
 }
 
-// Function to hide or show the _debug div based on `ltc._debug` value
+// Toggle debug div visibility
 function toggleDebugDiv(data) {
-  // Ensure the function only runs on the intended page
-  if (window.location.pathname !== "/") return;
-
   const debugDiv = document.getElementById("dataMembers");
+  if (!debugDiv) return;
+
   debugDiv.style.display = ltc._debug ? "block" : "none";
 }
 
-// Function to update the debug div content
+// Update the debug div content
 function updateDebugDiv(data) {
-  // Ensure the function only runs on the intended page
-  if (window.location.pathname !== "/") return;
-
   const dataMembersDiv = document.getElementById("dataMembers");
-  dataMembersDiv.innerHTML = ""; // Clear previous data
+  if (!dataMembersDiv) return;
 
+  dataMembersDiv.innerHTML = "";
   Object.entries(data).forEach(([key, value]) => {
     if (key.startsWith("_")) {
       return; // Skip keys starting with an underscore
@@ -92,35 +102,103 @@ function updateDebugDiv(data) {
   });
 }
 
+// Update frame rate based on frame history
 function updateFrameRate(ltc) {
-  // Initialize or reset the rolling array to track up to 60 frames
   if (!ltc._frame_history) ltc._frame_history = [];
 
-  // Add the current frame to the history
   ltc._frame_history.push(ltc.frames);
 
-  // Limit history to 60 frames (so we can check max after 60 frames)
   if (ltc._frame_history.length > 30) {
-    ltc._frame_history.shift(); // Remove the oldest frame when we have more than 60
+    ltc._frame_history.shift();
   }
 
-  // After 60 frames, calculate the max value and return max + 1 (if valid)
   if (ltc._frame_history.length === 30) {
     const maxFrame = Math.max(...ltc._frame_history);
     let calculatedFrameRate = maxFrame + 1;
 
-    // Only return valid frame rates: 24, 25, or 30
-    if (
-      calculatedFrameRate === 24 ||
-      calculatedFrameRate === 25 ||
-      calculatedFrameRate === 30
-    ) {
-      ltc._frame_rate = calculatedFrameRate;
+    if ([24, 25, 30].includes(calculatedFrameRate)) {
+      ltc.frame_rate = calculatedFrameRate;
     } else {
-      // Return 30 if the calculated frame rate is not 24, 25, or 30
-      ltc._frame_rate = null;
+      ltc.frame_rate = null;
     }
   }
 
-  return ltc._frame_rate;
+  return ltc.frame_rate;
+}
+
+// Attach event listeners and initialize UI
+document.addEventListener("DOMContentLoaded", () => {
+  // Hamburger menu and settings panel
+  const hamburger = document.getElementById("hamburger");
+  const settingsPanel = document.getElementById("settingsPanel");
+
+  if (hamburger && settingsPanel) {
+    hamburger.addEventListener("click", () => {
+      const isActive = hamburger.classList.toggle("active");
+      settingsPanel.style.display = isActive ? "block" : "none";
+    });
+  }
+
+  // Settings controls
+  const debugToggle = document.getElementById("debugToggle");
+  const holdTime = document.getElementById("holdTime");
+  const showInfoToggle = document.getElementById("showInfoToggle");
+
+  if (debugToggle) {
+    debugToggle.addEventListener("change", () => {
+      ltc._debug = debugToggle.checked;
+      console.log("Debug Mode:", ltc._debug);
+    });
+  }
+
+  if (holdTime) {
+    holdTime.addEventListener("input", (event) => {
+      let value = event.target.value.slice(0, 2);
+      holdTime.value = value;
+      ltc._hold = parseInt(value, 10) || 0;
+      console.log("Hold Time:", ltc._hold);
+    });
+  }
+
+  if (showInfoToggle) {
+    showInfoToggle.addEventListener("change", () => {
+      ltc._info = showInfoToggle.checked;
+      // Send the updated _info value to the WebSocket server
+      ws.send(JSON.stringify({ _info: ltc._info }));
+      updateInfoDisplay();
+      console.log("Show Info:", ltc._info);
+    });
+  }
+
+  // Initialize settings panel values
+  initializeSettingsPanel();
+});
+
+// Update displayed info
+function updateInfoDisplay() {
+  const fpsDiv = document.getElementById("fps");
+  const dfDiv = document.getElementById("df");
+
+  if (fpsDiv && dfDiv) {
+    if (ltc._info) {
+      fpsDiv.textContent = ltc.frame_rate || "";
+      dfDiv.textContent = ltc.drop_frame_format ? "df" : "";
+    } else {
+      fpsDiv.textContent = "";
+      dfDiv.textContent = "";
+    }
+  }
+}
+
+// Initialize settings panel with current `ltc` values
+function initializeSettingsPanel() {
+  const debugToggle = document.getElementById("debugToggle");
+  const holdTime = document.getElementById("holdTime");
+  const showInfoToggle = document.getElementById("showInfoToggle");
+
+  if (debugToggle) debugToggle.checked = ltc._debug;
+  if (holdTime) holdTime.value = ltc._hold || "";
+  if (showInfoToggle) showInfoToggle.checked = ltc._info;
+
+  updateInfoDisplay();
 }

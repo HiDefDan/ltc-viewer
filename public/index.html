@@ -6,9 +6,37 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>gpio-bus.dev LTC viewer</title>
   <link rel="stylesheet" href="styles.css" />
+  <script src="script.js"></script>
 </head>
 
 <body>
+  <div id="hamburger">
+    <div></div>
+    <div></div>
+    <div></div>
+  </div>
+
+  <div id="settingsPanel">
+    <h2>Settings</h2>
+    <div class="setting">
+      <label>
+        Debug:
+        <input type="checkbox" id="debugToggle" />
+      </label>
+    </div>
+    <div class="setting">
+      <label>
+        Hold (seconds):
+        <input type="number" id="holdTime" min="0" max="99" />
+      </label>
+    </div>
+    <div class="setting">
+      <label>
+        Show Info:
+        <input type="checkbox" id="showInfoToggle" />
+      </label>
+    </div>
+  </div>
   <div class="data-members" id="dataMembers"></div>
   <div class="container">
     <div class="base">88.88.88.88</div>
@@ -24,7 +52,6 @@
       </table>
     </div>
   </div>
-  <script src="script.js"></script>
 </body>
 
 </html>
