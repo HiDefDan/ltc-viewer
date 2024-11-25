@@ -2,12 +2,22 @@ const ws = new WebSocket("ws://" + window.location.host);
 
 // Default `ltc` state with explicit initialization
 let ltc = {
-  _running: false,
-  _debug: false,
-  _hold: 0,
-  _info: false,
+  drop_frame_format: "",
+  days: "",
+  months: "",
+  years: "",
+  hours: "",
+  minutes: "",
+  seconds: "",
+  frames: "",
+  offset_start: "",
+  reverse: "",
+  volume: "",
+  timezone: "",
   frame_rate: null,
-  drop_frame_format: false,
+  _debug: "",
+  _hold: "",
+  _info: "",
   _frame_history: [],
 };
 
