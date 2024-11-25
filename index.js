@@ -158,6 +158,11 @@ let ltc = {
   reverse: "",
   volume: "",
   timezone: "",
+  frame_rate: "",
+  _debug: "",
+  _hold: "",
+  _info: "",
+  _frame_history: [],
 };
 
 // Track the last state of ltc
@@ -201,7 +206,7 @@ ws.on("connection", (client) => {
         ltc._debug = parsedMessage._debug;
       } else if (parsedMessage.hasOwnProperty("_hold")) {
         ltc._hold = parsedMessage._hold;
-      }else if (parsedMessage.hasOwnProperty("_info")) {
+      } else if (parsedMessage.hasOwnProperty("_info")) {
         ltc._info = parsedMessage._info;
       }
     } catch (error) {
