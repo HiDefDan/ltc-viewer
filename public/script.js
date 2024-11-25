@@ -28,7 +28,13 @@ let isSystemTimeVisible = false; // Track if system time is currently visible
 // WebSocket message handling
 ws.onmessage = (event) => {
   const changes = JSON.parse(event.data);
+  console.log("Received message from WebSocket:", changes); // Debug message showing received data
+
+  // Apply the received changes to the `ltc` object
   Object.assign(ltc, changes);
+
+  // Call initializeSettingsPanel after updating `ltc`
+  initializeSettingsPanel(); // Ensure settings panel reflects changes immediately
 
   // Always update debug info based on the current state of _debug
   updateDebugDiv(ltc);
@@ -100,7 +106,6 @@ function clearSystemTime() {
 }
 
 // Toggle debug div visibility
-// Always toggle the debug div visibility based on _debug
 function toggleDebugDiv(data) {
   const debugDiv = document.getElementById("dataMembers");
   if (!debugDiv) return;
@@ -116,10 +121,6 @@ function updateDebugDiv(data) {
 
   dataMembersDiv.innerHTML = ""; // Clear the previous content
   Object.entries(data).forEach(([key, value]) => {
-    if (key.startsWith("_")) {
-      return; // Skip keys starting with an underscore
-    }
-
     const line = document.createElement("div");
     line.textContent = `${key}: ${value}`;
     dataMembersDiv.appendChild(line);
@@ -244,9 +245,18 @@ function initializeSettingsPanel() {
   const holdTime = document.getElementById("holdTime");
   const showInfoToggle = document.getElementById("showInfoToggle");
 
-  if (debugToggle) debugToggle.checked = ltc._debug;
-  if (holdTime) holdTime.value = ltc._hold || "";
-  if (showInfoToggle) showInfoToggle.checked = ltc._info;
+  if (debugToggle) {
+    debugToggle.checked = ltc._debug;
+    console.log("Debug:", ltc._debug); // Debugging line
+  }
+  if (holdTime) {
+    holdTime.value = ltc._hold || "";
+    console.log("Hold Time:", ltc._hold); // Debugging line
+  }
+  if (showInfoToggle) {
+    showInfoToggle.checked = ltc._info;
+    console.log("Info Display:", ltc._info); // Debugging line
+  }
 
   updateInfoDisplay();
 }

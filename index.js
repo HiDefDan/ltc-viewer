@@ -4,6 +4,16 @@ const express = require("express");
 const http = require("http");
 const WebSocket = require("ws"); // Import WebSocket library
 const path = require("path");
+const fs = require("fs");
+
+console.log("Current working directory:", process.cwd());
+// file for settings.json
+const settingsFilePath = path.join(__dirname, "settings.json");
+if (fs.existsSync(settingsFilePath)) {
+  console.log("Settings file exists.");
+} else {
+  console.log("Settings file does not exist.");
+}
 
 // Initialize RtAudio and LTCDecoder
 const rtAudio = new RtAudio();
@@ -196,11 +206,13 @@ function broadcastData() {
 
 ws.on("connection", (client) => {
   // Send the full state to the newly connected client
+  loadSettings();
   client.send(JSON.stringify(ltc));
 
   client.on("message", (message) => {
     try {
       const parsedMessage = JSON.parse(message.toString());
+      console.log("Received message:", parsedMessage); // Debugging line
 
       if (parsedMessage.hasOwnProperty("_debug")) {
         ltc._debug = parsedMessage._debug;
@@ -209,6 +221,9 @@ ws.on("connection", (client) => {
       } else if (parsedMessage.hasOwnProperty("_info")) {
         ltc._info = parsedMessage._info;
       }
+
+      // Save settings after changes
+      saveSettings();
     } catch (error) {
       client.send("Received non-JSON message:", message.toString());
     }
@@ -226,3 +241,41 @@ const port = 80;
 server.listen(port, () => {
   // console.log(`Server is running on http://localhost:${port}`);
 });
+
+// Function to save the current state to a file
+function saveSettings() {
+  const settings = {
+    _debug: ltc._debug,
+    _hold: ltc._hold,
+    _info: ltc._info,
+  };
+
+  console.log("Saving settings:", settings); // Debugging line
+
+  fs.writeFile(settingsFilePath, JSON.stringify(settings, null, 2), (err) => {
+    if (err) {
+      console.error("Error saving settings:", err);
+    } else {
+      console.log("Settings saved.");
+    }
+  });
+}
+
+// Function to read saved settings from file
+function loadSettings() {
+  try {
+    const data = fs.readFileSync(settingsFilePath, "utf8");
+    console.log("Loaded settings:", data); // Debugging line
+    const settings = JSON.parse(data);
+
+    // Apply loaded settings to the 'ltc' object
+    ltc._debug = settings._debug || false; // Default to false if not set
+    ltc._hold = settings._hold || 0; // Default to 0 if not set
+    ltc._info = settings._info || false; // Default to false if not set
+
+    // After loading settings, broadcast the updated state to all clients
+    broadcastData(); // Trigger sending the loaded settings to all connected clients
+  } catch (err) {
+    console.log("No saved settings found, using defaults.");
+  }
+}
