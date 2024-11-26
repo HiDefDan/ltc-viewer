@@ -28,7 +28,7 @@ let isSystemTimeVisible = false; // Track if system time is currently visible
 // WebSocket message handling
 ws.onmessage = (event) => {
   const changes = JSON.parse(event.data);
-  console.log("Received message from WebSocket:", changes); // Debug message showing received data
+  // console.log("Received message from WebSocket:", changes); // Debug message showing received data
 
   // Apply the received changes to the `ltc` object
   Object.assign(ltc, changes);
@@ -182,7 +182,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (debugToggle) {
     debugToggle.addEventListener("change", () => {
       ltc._debug = debugToggle.checked;
-      console.log("Debug Mode:", ltc._debug);
+      // console.log("Debug Mode:", ltc._debug);
 
       // Send the updated _debug value to the WebSocket server
       ws.send(JSON.stringify({ _debug: ltc._debug }));
@@ -201,7 +201,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
       // Send the updated _info value to the WebSocket server
       ws.send(JSON.stringify({ _hold: ltc._hold }));
-      console.log("Hold Time:", ltc._hold);
+      // console.log("Hold Time:", ltc._hold);
     });
   }
 
@@ -211,7 +211,7 @@ document.addEventListener("DOMContentLoaded", () => {
       // Send the updated _info value to the WebSocket server
       ws.send(JSON.stringify({ _info: ltc._info }));
       updateInfoDisplay();
-      console.log("Show Info:", ltc._info);
+      // console.log("Show Info:", ltc._info);
     });
   }
 
@@ -247,15 +247,15 @@ function initializeSettingsPanel() {
 
   if (debugToggle) {
     debugToggle.checked = ltc._debug;
-    console.log("Debug:", ltc._debug); // Debugging line
+    // console.log("Debug:", ltc._debug); // Debugging line
   }
   if (holdTime) {
     holdTime.value = ltc._hold || "";
-    console.log("Hold Time:", ltc._hold); // Debugging line
+    // console.log("Hold Time:", ltc._hold); // Debugging line
   }
   if (showInfoToggle) {
     showInfoToggle.checked = ltc._info;
-    console.log("Info Display:", ltc._info); // Debugging line
+    // console.log("Info Display:", ltc._info); // Debugging line
   }
 
   updateInfoDisplay();

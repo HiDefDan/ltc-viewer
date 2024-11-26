@@ -6,14 +6,14 @@ const WebSocket = require("ws"); // Import WebSocket library
 const path = require("path");
 const fs = require("fs");
 
-console.log("Current working directory:", process.cwd());
+// console.log("Current working directory:", process.cwd());
 // file for settings.json
 const settingsFilePath = path.join(__dirname, "settings.json");
-if (fs.existsSync(settingsFilePath)) {
-  console.log("Settings file exists.");
-} else {
-  console.log("Settings file does not exist.");
-}
+// if (fs.existsSync(settingsFilePath)) {
+//   console.log("Settings file exists.");
+// } else {
+//   console.log("Settings file does not exist.");
+// }
 
 // Initialize RtAudio and LTCDecoder
 const rtAudio = new RtAudio();
@@ -105,7 +105,7 @@ rtAudio.openStream(
       let frame = decoder.read();
 
       if (frame !== undefined) {
-        // console.log(frame);
+        console.log(frame);
         // Reset the lastFrameTime when a valid frame is received
         lastFrameTime = Date.now();
 
@@ -212,7 +212,7 @@ ws.on("connection", (client) => {
   client.on("message", (message) => {
     try {
       const parsedMessage = JSON.parse(message.toString());
-      console.log("Received message:", parsedMessage); // Debugging line
+      // console.log("Received message:", parsedMessage); // Debugging line
 
       if (parsedMessage.hasOwnProperty("_debug")) {
         ltc._debug = parsedMessage._debug;
@@ -230,7 +230,7 @@ ws.on("connection", (client) => {
   });
 
   client.on("close", () => {
-    console.log("Client disconnected");
+    // console.log("Client disconnected");
   });
 });
 
@@ -250,13 +250,13 @@ function saveSettings() {
     _info: ltc._info,
   };
 
-  console.log("Saving settings:", settings); // Debugging line
+  // console.log("Saving settings:", settings); // Debugging line
 
   fs.writeFile(settingsFilePath, JSON.stringify(settings, null, 2), (err) => {
     if (err) {
       console.error("Error saving settings:", err);
     } else {
-      console.log("Settings saved.");
+      // console.log("Settings saved.");
     }
   });
 }
@@ -265,7 +265,7 @@ function saveSettings() {
 function loadSettings() {
   try {
     const data = fs.readFileSync(settingsFilePath, "utf8");
-    console.log("Loaded settings:", data); // Debugging line
+    // console.log("Loaded settings:", data); // Debugging line
     const settings = JSON.parse(data);
 
     // Apply loaded settings to the 'ltc' object
