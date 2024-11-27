@@ -6,6 +6,8 @@ const WebSocket = require("ws"); // Import WebSocket library
 const path = require("path");
 const fs = require("fs");
 
+http.globalAgent.maxSockets = Infinity;
+
 // console.log("Current working directory:", process.cwd());
 // file for settings.json
 const settingsFilePath = path.join(__dirname, "settings.json");
