@@ -107,7 +107,7 @@ rtAudio.openStream(
       let frame = decoder.read();
 
       if (frame !== undefined) {
-        console.log(frame);
+        // console.log(frame);
         // Reset the lastFrameTime when a valid frame is received
         lastFrameTime = Date.now();
 
@@ -127,6 +127,7 @@ rtAudio.openStream(
         ltc.reverse = frame.reverse;
         ltc.volume = frame.volume;
         ltc._running = true;
+        ltc._timestamp = lastFrameTime;
       } else {
         // If frame is undefined, check how long it's been
         const currentTime = Date.now();
@@ -175,6 +176,7 @@ let ltc = {
   _hold: "",
   _info: "",
   _frame_history: [],
+  _timestamp: "",
 };
 
 // Track the last state of ltc

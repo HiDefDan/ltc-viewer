@@ -19,6 +19,8 @@ let ltc = {
   _hold: "",
   _info: "",
   _frame_history: [],
+  _latency_ms: null,
+  _latency_frames: null,
 };
 
 let firstRun = true;
@@ -41,9 +43,15 @@ ws.onmessage = (event) => {
   toggleDebugDiv(ltc);
 
   if (ltc._running) {
-    clearSystemTime();
-    displayLTC();
     updateFrameRate(ltc);
+    if (processChanges(changes)) {
+      ltc._latency_ms = latency[1];
+      ltc._latency_frames = getWsLatencyFrames(ltc._latency_ms, ltc.frame_rate);
+      clearSystemTime();
+      if (ltc.frame_rate) {
+        displayLTC();
+      }
+    }
   } else if (ltc._hold > 0 || firstRun) {
     const systemTimeDisplayDelay = firstRun ? 0 : ltc._hold * 1000;
     setTimeout(showSystemTime, systemTimeDisplayDelay);
@@ -59,11 +67,7 @@ function displayLTC() {
   const timeStringElem = document.getElementById("timeString");
   if (!timeStringElem) return;
 
-  timeStringElem.textContent = `${ltc.hours?.toString().padStart(2, "0") || "00"}.${
-    ltc.minutes?.toString().padStart(2, "0") || "00"
-  }.${ltc.seconds?.toString().padStart(2, "0") || "00"}.${
-    ltc.frames?.toString().padStart(2, "0") || "00"
-  }`;
+  timeStringElem.textContent = adjustTimeForLatency(ltc);
   timeStringElem.className = "";
 
   // If _hold is 0, keep the last timecode visible
@@ -259,4 +263,90 @@ function initializeSettingsPanel() {
   }
 
   updateInfoDisplay();
+}
+
+function getWsLatencyFrames(wsLatencyMs, frameRate) {
+  if (!wsLatencyMs || !frameRate) {
+    // console.log(`Websocket latency or framerate are not available`);
+    return;
+  }
+  return Math.round(wsLatencyMs / (1000 / frameRate));
+}
+let timestamps = []; // Array to store the last two timestamps
+let latency = [];
+
+function processChanges(changes) {
+  const currentTimestamp = changes._timestamp;
+
+  // Add the current frame to the history
+  timestamps.push(currentTimestamp);
+
+  // Limit the history to 2 timestamps
+  if (timestamps.length > 2) {
+    timestamps.shift();
+  }
+
+  // add the current differnce to the differences array
+  latency.push(timestamps[1] - timestamps[0]);
+
+  // Limit the history to 2 timestamps
+  if (latency.length > 2) {
+    latency.shift();
+  }
+
+  const latencyPercentage = (
+    (Math.abs(latency[1] - latency[0]) / latency[0]) *
+    100
+  ).toFixed(3);
+
+  return latencyPercentage < 5;
+}
+
+function adjustTimeForLatency(ltc) {
+  monitorFrameRate(ltc);
+  // Adjust frames by adding latency frames
+  ltc.frames += ltc._latency_frames;
+
+  // If frames exceed the frame rate (should be 0 to frame_rate - 1)
+  if (ltc.frames >= ltc.frame_rate) {
+    ltc.frames -= ltc.frame_rate; // Reset frames to fit within frame rate
+    ltc.seconds += 1; // Increment seconds
+  }
+
+  // If seconds exceed 59, increment minutes
+  if (ltc.seconds >= 60) {
+    ltc.seconds -= 60; // Reset seconds to 0
+    ltc.minutes += 1; // Increment minutes
+  }
+
+  // If minutes exceed 59, increment hours
+  if (ltc.minutes >= 60) {
+    ltc.minutes -= 60; // Reset minutes to 0
+    ltc.hours += 1; // Increment hours
+  }
+
+  // If hours exceed 23, reset to 0 (wrap around)
+  if (ltc.hours >= 24) {
+    ltc.hours = 0; // Reset hours to 0
+  }
+
+  // Format the time string
+  const timeString = `${ltc.hours?.toString().padStart(2, "0") || "00"}:${
+    ltc.minutes?.toString().padStart(2, "0") || "00"
+  }:${ltc.seconds?.toString().padStart(2, "0") || "00"}:${
+    ltc.frames?.toString().padStart(2, "0") || "00"
+  }`;
+
+  return timeString;
+}
+
+let previousFrameRate = null;
+
+function monitorFrameRate(ltc) {
+  if (ltc.frame_rate !== previousFrameRate) {
+    console.warn(
+      `Frame rate changed from ${previousFrameRate} to ${ltc.frame_rate}`,
+    );
+    previousFrameRate = ltc.frame_rate;
+  }
 }
