@@ -1,0 +1,132 @@
+# Default config for sway : /etc/sway/config
+#
+# Copy this to ~/.config/sway/config for ltc-viewer.service
+#
+# Read `man 5 sway` for a complete reference.
+
+# clean up flags relating to clean exit or crashes (needs expanding for eac profile launched)
+exec bash -c "sed -i 's/\"exited_cleanly\":false/\"exited_cleanly\":true/' ~/.config/chromium/HDMI-A-1/Default/Preferences"
+exec bash -c "sed -i 's/\"exit_type\": \"Crashed\"/\"exit_type\": \"Normal\"/' ~/.config/chromium/HDMI-A-1/Default/Preferences"
+exec bash -c "sed -i 's/\"exited_cleanly\":false/\"exited_cleanly\":true/' ~/.config/chromium/HDMI-A-2/Default/Preferences"
+exec bash -c "sed -i 's/\"exit_type\": \"Crashed\"/\"exit_type\": \"Normal\"/' ~/.config/chromium/HDMI-A-2/Default/Preferences"
+
+### Output configuration
+#
+# Default wallpaper (more resolutions are available in /usr/share/backgrounds/sway/)
+#output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill
+output HDMI-A-1 {
+mode 1920x1080@60Hz
+bg /home/admin/.config/sway/bg.png fill
+#bg #000000 solid_color
+}
+
+output HDMI-A-2 {
+mode 420x960@60Hz
+transform 270
+bg /home/admin/.config/sway/bg.png fill
+#bg #000000 solid_color
+}
+
+# Launch Chromium in Workspace 1
+exec swaymsg "workspace 1; exec chromium-browser http://127.0.0.1/displays.html \
+    --kiosk \
+    --user-data-dir=/home/admin/.config/chromium/HDMI-A-1 \
+     --no-default-browser-check \
+    --noerrdialogs \
+    --disable-infobars \
+    --hide-scrollbars \
+    --no-first-run \
+    --ozone-platform=wayland \
+    --simulate-outdated-no-au='Tue, 31 Dec 2099 23:59:59 GMT' \
+    --disable-background-timer-throttling \
+    --disable-renderer-backgrounding \
+    --disable-application-cache \
+    --disk-cache-size=0 \
+    --media-cache-size=0 \
+    --enable-low-end-device-mode \
+    --disable-accelerated-2d-canvas \
+    --renderer-process-limit=1 \
+    --single-process \
+    --in-process-gpu \
+    --disable-logging \
+    --disable-hang-monitor \
+    --disable-site-isolation-trials \
+    --disable-preconnect \
+    --allow-insecure-localhost \
+    --disable-background-networking \
+    --host-resolver-rules='MAP * 127.0.0.1' \
+    --disable-gpu-vsync \
+    --enable-gpu \
+    --use-angle=gl \
+    --disable-software-rasterizer \
+    --enable-skia \
+    --skia-deferred-display-list \
+    --enable-gpu-rasterization \
+    --enable-accelerated-video-decode \
+    --enable-webgl \
+    --enable-webgl2 \
+    --webgl-antialiasing-mode=none \
+    --force-compositing-mode \
+    --force-gpu-compositing \
+    --enable-zero-copy \
+    --disable-extensions \
+    --disable-plugins \
+    --disable-translate \
+    --max-tabs=1 \
+    --force-dark-mode \
+    --blink-settings='forceDarkModeEnabled=true,lowLatencyRenderingEnabled=true' \
+    --show-fps-counter \
+    --disable-frame-rate-limit"
+
+# Launch Chromium in Workspace 2
+exec swaymsg "workspace 2; exec chromium-browser http://127.0.0.1/displays.html \
+    --kiosk \
+    --user-data-dir=/home/admin/.config/chromium/HDMI-A-2 \
+     --no-default-browser-check \
+    --noerrdialogs \
+    --disable-infobars \
+    --hide-scrollbars \
+    --no-first-run \
+    --ozone-platform=wayland \
+    --simulate-outdated-no-au='Tue, 31 Dec 2099 23:59:59 GMT' \
+    --disable-background-timer-throttling \
+    --disable-renderer-backgrounding \
+    --disable-application-cache \
+    --disk-cache-size=0 \
+    --media-cache-size=0 \
+    --enable-low-end-device-mode \
+    --disable-accelerated-2d-canvas \
+    --renderer-process-limit=1 \
+    --single-process \
+    --in-process-gpu \
+    --disable-logging \
+    --disable-hang-monitor \
+    --disable-site-isolation-trials \
+    --disable-preconnect \
+    --allow-insecure-localhost \
+    --disable-background-networking \
+    --host-resolver-rules='MAP * 127.0.0.1' \
+    --disable-gpu-vsync \
+    --enable-gpu \
+    --use-angle=gl \
+    --disable-software-rasterizer \
+    --enable-skia \
+    --skia-deferred-display-list \
+    --enable-gpu-rasterization \
+    --enable-accelerated-video-decode \
+    --enable-webgl \
+    --enable-webgl2 \
+    --webgl-antialiasing-mode=none \
+    --force-compositing-mode \
+    --force-gpu-compositing \
+    --enable-zero-copy \
+    --disable-extensions \
+    --disable-plugins \
+    --disable-translate \
+    --max-tabs=1 \
+    --force-dark-mode \
+    --blink-settings='forceDarkModeEnabled=true,lowLatencyRenderingEnabled=true' \
+    --disable-frame-rate-limit"
+
+# hide the cursor
+seat seat0 hide_cursor 0001
