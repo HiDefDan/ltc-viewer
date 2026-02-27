@@ -1,0 +1,23 @@
+[Unit]
+Description=LTC Timecode Reader for Raspberry Pi 5
+After=multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/ltc-timecode
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ltc-timecode
+
+# Run on isolated CPU core (CPU 3 on Pi 5)
+CPUAffinity=3
+
+# Note: Real-time scheduling and memory locking are applied by the application itself
+# via sched_setscheduler(SCHED_FIFO) and mlockall() to ensure they're set correctly
+
+[Install]
+WantedBy=multi-user.target

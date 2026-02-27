@@ -1,0 +1,15 @@
+# Build artifacts
+*.o
+ltc-timecode
+build/
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

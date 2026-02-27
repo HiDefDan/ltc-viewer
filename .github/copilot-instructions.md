@@ -1,0 +1,12 @@
+- [ ] Verify project structure created
+- [ ] Clarify DRM/KMS framebuffer rendering approach
+- [ ] Scaffold project with Makefile, headers, and source files
+- [ ] Implement DRM initialization and page flipping
+- [ ] Implement bitmap font rendering engine
+- [ ] Implement LTC decoder (bi-phase) stub
+- [ ] Implement GPIO edge capture stub (pigpio ready)
+- [ ] Create main render loop with vblank sync
+- [ ] Compile and test on Raspberry Pi 5
+- [ ] Set up systemd service for autostart
+- [ ] Document hardware wiring and configuration
+- [ ] Verify latency profile and optimize if needed
