@@ -28,7 +28,7 @@ int config_watcher_init(config_watcher_t *watcher, const char *config_path) {
 
     // Watch directory for file modifications (more reliable than watching file directly)
     watcher->watch_fd = inotify_add_watch(watcher->inotify_fd, dir_path, 
-                                         IN_MODIFY | IN_CLOSE_WRITE);
+                                         IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO);
     if (watcher->watch_fd < 0) {
         perror("inotify_add_watch");
         close(watcher->inotify_fd);
@@ -62,9 +62,16 @@ int config_watcher_check(config_watcher_t *watcher) {
     for (int i = 0; i < len; ) {
         struct inotify_event *event = (struct inotify_event *)&buf[i];
         
+        if (event->len > 0) {
+            fprintf(stderr, "[CONFIG-WATCHER] Event: name=%s, mask=%u, len=%u\n", event->name, event->mask, event->len);
+        }
+        
         // Check if this is our config file
         if (event->len > 0 && strcmp(event->name, config_filename) == 0) {
-            if (event->mask & (IN_MODIFY | IN_CLOSE_WRITE)) {
+            fprintf(stderr, "[CONFIG-WATCHER] Detected change to %s (mask=%u)\n", config_filename, event->mask);
+            if (event->mask & (IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO)) {
+                fprintf(stderr, "[CONFIG-WATCHER] File change detected (IN_MODIFY=%d, IN_CLOSE_WRITE=%d, IN_MOVED_TO=%d)\n", 
+                        !!(event->mask & IN_MODIFY), !!(event->mask & IN_CLOSE_WRITE), !!(event->mask & IN_MOVED_TO));
                 changed = 1;
             }
         }

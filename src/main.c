@@ -56,9 +56,25 @@ int main(int argc, char *argv[]) {
         printf("[MAIN] Memory locked\n");
     }
 
-    /* Initialize DRM for framebuffer rendering */
+    /* Initialize config watcher early */
+    config_watcher_t config_watcher = {0};
+    const char *config_path = "/etc/ltc-viewer/config.json";
+    if (config_watcher_init(&config_watcher, config_path) != 0) {
+        fprintf(stderr, "Warning: Failed to initialize config watcher\n");
+    } else {
+        printf("[MAIN] Config watcher initialized for %s\n", config_path);
+    }
+
+    /* Load initial configuration BEFORE DRM init */
+    ltc_config_t current_config = {0};
+    config_load(config_path, &current_config);
+    printf("[MAIN] Initial config loaded: TZ=%s, NTP=%s, Hz=%d\n",
+           current_config.timezone, current_config.ntp_server, current_config.refresh_hz);
+
+    /* Initialize DRM for framebuffer rendering with config refresh rate */
     ltc_drm_context_t drm = {0};
-    if (drm_init(&drm, TARGET_REFRESH_HZ)) {
+    uint32_t target_hz = (current_config.refresh_hz > 0) ? current_config.refresh_hz : TARGET_REFRESH_HZ;
+    if (drm_init(&drm, target_hz)) {
         fprintf(stderr, "Failed to initialize DRM\n");
         return EXIT_FAILURE;
     }
@@ -104,21 +120,6 @@ int main(int argc, char *argv[]) {
     fflush(stdout);
     printf("[MAIN] GPIO initialized on BCM%d (boot+%.3f s)\n", GPIO_LTC_PIN, ts.tv_sec + ts.tv_nsec/1e9);
 
-    /* Initialize config watcher */
-    config_watcher_t config_watcher = {0};
-    const char *config_path = "/etc/ltc-viewer/config.json";
-    if (config_watcher_init(&config_watcher, config_path) != 0) {
-        fprintf(stderr, "Warning: Failed to initialize config watcher\n");
-    } else {
-        printf("[MAIN] Config watcher initialized for %s\n", config_path);
-    }
-
-    /* Load initial configuration */
-    ltc_config_t current_config = {0};
-    config_load(config_path, &current_config);
-    printf("[MAIN] Initial config loaded: TZ=%s, NTP=%s, Hz=%d\n",
-           current_config.timezone, current_config.ntp_server, current_config.refresh_hz);
-
     /* Main render loop */
     uint64_t frame_count = 0;
     time_t last_time_display = 0;
@@ -131,13 +132,37 @@ int main(int argc, char *argv[]) {
         /* Check if config file has changed */
         if (config_watcher_check(&config_watcher) > 0) {
             printf("[MAIN] Config file changed, reloading...\n");
+            fflush(stdout);
             ltc_config_t new_config = {0};
             if (config_load(config_path, &new_config) == 0) {
+                printf("[DEBUG] New config loaded: Hz=%d\n", new_config.refresh_hz);
+                printf("[DEBUG] Current config: Hz=%d\n", current_config.refresh_hz);
+                fflush(stdout);
+                
+                /* Check if refresh rate changed */
+                if (new_config.refresh_hz != current_config.refresh_hz && new_config.refresh_hz > 0) {
+                    printf("[MAIN] Refresh rate changed from %d Hz to %d Hz, reinitializing DRM...\n",
+                           current_config.refresh_hz, new_config.refresh_hz);
+                    fflush(stdout);
+                    drm_cleanup(&drm);
+                    if (drm_init(&drm, new_config.refresh_hz) == 0) {
+                        printf("[MAIN] DRM reinitialized successfully: %u Hz\n", drm.mode_vrefresh);
+                        fflush(stdout);
+                    } else {
+                        fprintf(stderr, "[MAIN] Failed to reinitialize DRM with %d Hz, exiting\n", new_config.refresh_hz);
+                        fflush(stderr);
+                        should_exit = 1;
+                    }
+                } else {
+                    printf("[DEBUG] No refresh rate change detected or invalid Hz\n");
+                    fflush(stdout);
+                }
                 current_config = new_config;
                 printf("[MAIN] Config reloaded: TZ=%s, NTP=%s, Hz=%d, Pos=(%d,%d), Color=(%d,%d,%d)\n",
                        current_config.timezone, current_config.ntp_server, current_config.refresh_hz,
                        current_config.timecode_x, current_config.timecode_y,
                        current_config.color_r, current_config.color_g, current_config.color_b);
+                fflush(stdout);
             }
         }
 

@@ -120,7 +120,7 @@ class ConfigManager {
             customs.forEach(server => {
                 const option = document.createElement('option');
                 option.value = server.name;
-                option.textContent = server.name + ' (custom)';
+                option.textContent = server.name;
                 customGroup.appendChild(option);
             });
             select.appendChild(customGroup);
@@ -150,7 +150,6 @@ class ConfigManager {
             item.innerHTML = `
                 <div>
                     <span class="server-name">${server.name}</span>
-                    <span class="server-type">custom</span>
                 </div>
                 <button type="button" class="delete-btn" data-server="${server.name}">Delete</button>
             `;
