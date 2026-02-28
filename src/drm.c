@@ -59,16 +59,36 @@ static int find_hdmi_connector(int fd, uint32_t *connector_id) {
 
 /* Find best matching mode for target refresh rate */
 static drmModeModeInfo *find_mode_by_refresh(drmModeConnector *conn, uint32_t target_refresh) {
+    printf("[DRM] Looking for mode: %ux%u @ %u Hz. Available modes:\n", DISPLAY_WIDTH, DISPLAY_HEIGHT, target_refresh);
+    
     for (int i = 0; i < conn->count_modes; i++) {
         drmModeModeInfo *mode = &conn->modes[i];
+        printf("[DRM]   Mode %d: %ux%u @ %u Hz\n", i, mode->hdisplay, mode->vdisplay, mode->vrefresh);
+        
         if (mode->vrefresh == target_refresh &&
             mode->hdisplay == DISPLAY_WIDTH &&
             mode->vdisplay == DISPLAY_HEIGHT) {
+            printf("[DRM] Found exact match!\n");
             return mode;
         }
     }
-    /* Fallback to first mode if exact match not found */
-    return conn->count_modes > 0 ? &conn->modes[0] : NULL;
+    
+    /* Fallback: try to find closest refresh rate at correct resolution */
+    for (int i = 0; i < conn->count_modes; i++) {
+        drmModeModeInfo *mode = &conn->modes[i];
+        if (mode->hdisplay == DISPLAY_WIDTH && mode->vdisplay == DISPLAY_HEIGHT) {
+            printf("[DRM] Fallback: using mode %ux%u @ %u Hz (requested %u Hz)\n", 
+                   mode->hdisplay, mode->vdisplay, mode->vrefresh, target_refresh);
+            return mode;
+        }
+    }
+    
+    /* Last resort: use first mode */
+    if (conn->count_modes > 0) {
+        printf("[DRM] No resolution match, using first available mode\n");
+        return &conn->modes[0];
+    }
+    return NULL;
 }
 
 /* Allocate a dumb buffer (CPU-rendered) */
@@ -122,6 +142,8 @@ static int allocate_dumb_buffer(int fd, ltc_drm_framebuffer_t *fb, uint32_t widt
 }
 
 int drm_init(ltc_drm_context_t *ctx, uint32_t target_vrefresh) {
+    printf("[DRM] drm_init called with target_vrefresh=%u\n", target_vrefresh);
+    fflush(stdout);
     memset(ctx, 0, sizeof(*ctx));
 
     /* Open DRM device - try /dev/dri/card0, card1, etc. with resource validation */
