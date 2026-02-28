@@ -154,7 +154,7 @@ void font_load_background(void) {
 void font_blit_background(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
                           uint32_t x, uint32_t y) {
     /* Render "8.8.8.8.8.8.8.8." - subtle dark gray visible on black canvas */
-    uint32_t glyph_color = 0xFF3C3C3C;   /* RGB(60, 60, 60) - light charcoal, subtle but visible */
+    uint32_t glyph_color = 0xFF191919;   /* RGB(25, 25, 25) - dark plastic, subtle but visible */
     const char *bg_pattern = "8.8.8.8.8.8.8.8.";
     
     font_blit_string(fb, fb_width, fb_height, fb_pitch,

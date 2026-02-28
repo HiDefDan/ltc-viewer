@@ -60,34 +60,47 @@ static int find_hdmi_connector(int fd, uint32_t *connector_id) {
 /* Find best matching mode for target refresh rate */
 static drmModeModeInfo *find_mode_by_refresh(drmModeConnector *conn, uint32_t target_refresh) {
     printf("[DRM] Looking for mode: %ux%u @ %u Hz. Available modes:\n", DISPLAY_WIDTH, DISPLAY_HEIGHT, target_refresh);
+    fflush(stdout);
     
     for (int i = 0; i < conn->count_modes; i++) {
         drmModeModeInfo *mode = &conn->modes[i];
-        printf("[DRM]   Mode %d: %ux%u @ %u Hz\n", i, mode->hdisplay, mode->vdisplay, mode->vrefresh);
+        printf("[DRM]   Mode %d: %ux%u @ %u Hz (checking: res=%d, hz=%d)\n", i, mode->hdisplay, mode->vdisplay, mode->vrefresh,
+               (mode->hdisplay == DISPLAY_WIDTH && mode->vdisplay == DISPLAY_HEIGHT),
+               (mode->vrefresh == target_refresh));
+        fflush(stdout);
         
         if (mode->vrefresh == target_refresh &&
             mode->hdisplay == DISPLAY_WIDTH &&
             mode->vdisplay == DISPLAY_HEIGHT) {
-            printf("[DRM] Found exact match!\n");
+            printf("[DRM] Found exact match at mode %d: %ux%u @ %u Hz!\n", i, mode->hdisplay, mode->vdisplay, mode->vrefresh);
+            fflush(stdout);
             return mode;
         }
     }
+    
+    printf("[DRM] No exact match found, trying fallback\n");
+    fflush(stdout);
     
     /* Fallback: try to find closest refresh rate at correct resolution */
     for (int i = 0; i < conn->count_modes; i++) {
         drmModeModeInfo *mode = &conn->modes[i];
         if (mode->hdisplay == DISPLAY_WIDTH && mode->vdisplay == DISPLAY_HEIGHT) {
-            printf("[DRM] Fallback: using mode %ux%u @ %u Hz (requested %u Hz)\n", 
-                   mode->hdisplay, mode->vdisplay, mode->vrefresh, target_refresh);
+            printf("[DRM] Fallback: using mode %d: %ux%u @ %u Hz (requested %u Hz)\n", 
+                   i, mode->hdisplay, mode->vdisplay, mode->vrefresh, target_refresh);
+            fflush(stdout);
             return mode;
         }
     }
     
     /* Last resort: use first mode */
     if (conn->count_modes > 0) {
-        printf("[DRM] No resolution match, using first available mode\n");
+        printf("[DRM] No resolution match, using first available mode: %ux%u @ %u Hz\n",
+               conn->modes[0].hdisplay, conn->modes[0].vdisplay, conn->modes[0].vrefresh);
+        fflush(stdout);
         return &conn->modes[0];
     }
+    printf("[DRM] No modes available at all!\n");
+    fflush(stdout);
     return NULL;
 }
 
@@ -190,8 +203,13 @@ int drm_init(ltc_drm_context_t *ctx, uint32_t target_vrefresh) {
         return -1;
     }
 
+    printf("[DRM] Got connector with %d modes. Searching for target=%u Hz...\n", conn->count_modes, target_vrefresh);
+    fflush(stdout);
+
     /* Find best mode */
     drmModeModeInfo *mode = find_mode_by_refresh(conn, target_vrefresh);
+    fflush(stdout);
+
     if (!mode) {
         /* No exact match - use first available mode */
         if (conn->count_modes > 0) {
