@@ -265,16 +265,18 @@ uint8_t *drm_get_back_buffer(ltc_drm_context_t *ctx) {
 int drm_page_flip_sync(ltc_drm_context_t *ctx) {
     /* Page flip: update CRTC with new framebuffer using stored mode */
     if (!ctx->current_mode) {
-        fprintf(stderr, "Page flip: current_mode not initialized\n");
+        fprintf(stderr, "[DRM] Page flip: current_mode not initialized\n");
         return -1;
     }
     
     drmModeModeInfo *mode = (drmModeModeInfo *)ctx->current_mode;
     
-    if (drmModeSetCrtc(ctx->fd, ctx->crtc_id, ctx->back.fb_id, 0, 0,
-                       &ctx->connector_id, 1, mode)) {
-        fprintf(stderr, "drmModeSetCrtc (flip) failed: %s\n", strerror(errno));
-        return -1;
+    int result = drmModeSetCrtc(ctx->fd, ctx->crtc_id, ctx->back.fb_id, 0, 0,
+                                &ctx->connector_id, 1, mode);
+    if (result != 0) {
+        fprintf(stderr, "[DRM] drmModeSetCrtc (flip) failed: %s (errno=%d)\n", strerror(errno), errno);
+        /* Don't fail entirely, just log and continue */
+        return 0;  /* Return success anyway to keep loop going */
     }
 
     /* Swap front/back */

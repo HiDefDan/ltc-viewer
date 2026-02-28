@@ -237,7 +237,8 @@ int main(int argc, char *argv[]) {
         }
 
         if (drm_page_flip_sync(&drm)) {
-            fprintf(stderr, "Page flip failed\n");
+            fprintf(stderr, "[MAIN] Page flip failed\n");
+            fflush(stderr);
             break;
         }
 
@@ -246,6 +247,13 @@ int main(int argc, char *argv[]) {
         /* Log status every ~5 seconds */
         if ((frame_count % (5 * drm.mode_vrefresh)) == 0) {
             printf("[MAIN] Frame %" PRIu64 ", Timecode: %s\n", frame_count, timecode_str);
+            fflush(stdout);
+        }
+        
+        /* Debug: log every N frames */
+        if ((frame_count % 250) == 0 && frame_count > 0) {
+            printf("[DEBUG] Rendered frame %" PRIu64 "\n", frame_count);
+            fflush(stdout);
         }
 
         /* Yield CPU briefly to allow GPIO edges to be captured */
