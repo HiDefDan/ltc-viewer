@@ -1,12 +1,25 @@
 #define _POSIX_C_SOURCE 200809L
 #include "config-service.h"
 #include "config-management.h"
+#include "config.h"
 #include <microhttpd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <math.h>
+
+/* DRM includes for display mode detection */
+typedef unsigned int drm_handle_t;
+typedef unsigned int drm_magic_t;
+typedef unsigned int drm_context_t;
+typedef unsigned int drm_drawable_t;
+#include <libdrm/drm_mode.h>
+#include <xf86drm.h>
+#include <xf86drmMode.h>
 
 static struct MHD_Daemon *daemon = NULL;
 static char config_file_path[512];
@@ -27,6 +40,7 @@ static int handle_post_config(struct MHD_Connection *conn, const char *upload_da
 static int handle_get_tzdata(struct MHD_Connection *conn);
 static int handle_get_ntp_status(struct MHD_Connection *conn);
 static int handle_get_ntp_servers(struct MHD_Connection *conn);
+static int handle_get_display_modes(struct MHD_Connection *conn);
 
 /* Stratum 0 NTP servers for precise atomic clock synchronization */
 static const char *stratum0_servers[] = {
@@ -420,6 +434,129 @@ static int handle_get_ntp_servers(struct MHD_Connection *conn) {
     return send_response(conn, response, strlen(response), MHD_HTTP_OK, "application/json");
 }
 
+static int handle_get_display_modes(struct MHD_Connection *conn) {
+    /* Query DRM device for available display modes at target resolution */
+    int fd = -1;
+    char response[4096];
+    
+    /* Open DRM device */
+    for (int i = 0; i < 16; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/dev/dri/card%d", i);
+        
+        fd = open(path, O_RDWR);
+        if (fd < 0) continue;
+        
+        /* Test if this device has DRM resources */
+        drmModeRes *res = drmModeGetResources(fd);
+        if (!res) {
+            close(fd);
+            fd = -1;
+            continue;
+        }
+        drmModeFreeResources(res);
+        break;
+    }
+    
+    if (fd < 0) {
+        snprintf(response, sizeof(response), 
+                "{\"error\": \"Failed to open DRM device\", \"modes\": []}");
+        return send_response(conn, response, strlen(response), 
+                           MHD_HTTP_INTERNAL_SERVER_ERROR, "application/json");
+    }
+    
+    /* Find HDMI connector */
+    drmModeRes *res = drmModeGetResources(fd);
+    if (!res) {
+        close(fd);
+        snprintf(response, sizeof(response), 
+                "{\"error\": \"Failed to get DRM resources\", \"modes\": []}");
+        return send_response(conn, response, strlen(response), 
+                           MHD_HTTP_INTERNAL_SERVER_ERROR, "application/json");
+    }
+    
+    uint32_t connector_id = 0;
+    drmModeConnector *conn_drm = NULL;
+    
+    for (int i = 0; i < res->count_connectors; i++) {
+        conn_drm = drmModeGetConnector(fd, res->connectors[i]);
+        if (!conn_drm) continue;
+        
+        if ((conn_drm->connector_type == DRM_MODE_CONNECTOR_HDMIA ||
+             conn_drm->connector_type == DRM_MODE_CONNECTOR_HDMIB) &&
+            conn_drm->connection == DRM_MODE_CONNECTED) {
+            connector_id = res->connectors[i];
+            break;
+        }
+        drmModeFreeConnector(conn_drm);
+        conn_drm = NULL;
+    }
+    
+    if (!conn_drm) {
+        drmModeFreeResources(res);
+        close(fd);
+        snprintf(response, sizeof(response), 
+                "{\"error\": \"No connected HDMI display found\", \"modes\": []}");
+        return send_response(conn, response, strlen(response), 
+                           MHD_HTTP_NOT_FOUND, "application/json");
+    }
+    
+    /* Extract unique refresh rates for target resolution (1920x1080) */
+    char *pos = response;
+    int remaining = sizeof(response);
+    int written = snprintf(pos, remaining, "{\"modes\": [");
+    pos += written;
+    remaining -= written;
+    
+    int found_count = 0;
+    float seen_rates[32] = {0};  /* Track seen refresh rates with decimal precision */
+    
+    for (int i = 0; i < conn_drm->count_modes && found_count < 32; i++) {
+        drmModeModeInfo *mode = &conn_drm->modes[i];
+        
+        /* Only include modes at target resolution */
+        if (mode->hdisplay != DISPLAY_WIDTH || mode->vdisplay != DISPLAY_HEIGHT) {
+            continue;
+        }
+        
+        /* Calculate actual refresh rate from timings for precision (60.00 vs 59.94) */
+        float actual_refresh = (float)mode->clock * 1000.0f / 
+                               ((float)mode->htotal * (float)mode->vtotal);
+        
+        /* Check if we've already seen this refresh rate (within 0.01 Hz tolerance) */
+        int duplicate = 0;
+        for (int j = 0; j < found_count; j++) {
+            if (fabsf(seen_rates[j] - actual_refresh) < 0.01f) {
+                duplicate = 1;
+                break;
+            }
+        }
+        
+        if (!duplicate) {
+            if (found_count > 0 && remaining > 2) {
+                written = snprintf(pos, remaining, ", ");
+                pos += written;
+                remaining -= written;
+            }
+            
+            /* Output with 2 decimal places to distinguish 60.00 from 59.94 */
+            written = snprintf(pos, remaining, "%.2f", actual_refresh);
+            pos += written;
+            remaining -= written;
+            
+            seen_rates[found_count++] = actual_refresh;
+        }
+    }
+    
+    written = snprintf(pos, remaining, "]}");
+    
+    drmModeFreeConnector(conn_drm);
+    drmModeFreeResources(res);
+    close(fd);
+    
+    return send_response(conn, response, strlen(response), MHD_HTTP_OK, "application/json");
+}
+
 static int request_handler(void *cls, struct MHD_Connection *conn,
                           const char *url, const char *method,
                           const char *version, const char *upload_data,
@@ -454,6 +591,9 @@ static int request_handler(void *cls, struct MHD_Connection *conn,
     }
     if (strcmp(url, "/api/ntp-servers") == 0) {
         return handle_get_ntp_servers(conn);
+    }
+    if (strcmp(url, "/api/display-modes") == 0) {
+        return handle_get_display_modes(conn);
     }
     
     return send_response(conn, "Not Found", 9, MHD_HTTP_NOT_FOUND, "text/plain");

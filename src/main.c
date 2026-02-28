@@ -8,6 +8,7 @@
 #include <inttypes.h>
 #include <sched.h>
 #include <sys/mman.h>
+#include <math.h>
 
 #include "drm.h"
 #include "font.h"
@@ -68,12 +69,12 @@ int main(int argc, char *argv[]) {
     /* Load initial configuration BEFORE DRM init */
     ltc_config_t current_config = {0};
     config_load(config_path, &current_config);
-    printf("[MAIN] Initial config loaded: TZ=%s, NTP=%s, Hz=%d\n",
+    printf("[MAIN] Initial config loaded: TZ=%s, NTP=%s, Hz=%.2f\n",
            current_config.timezone, current_config.ntp_server, current_config.refresh_hz);
 
     /* Initialize DRM for framebuffer rendering with config refresh rate */
     ltc_drm_context_t drm = {0};
-    uint32_t target_hz = (current_config.refresh_hz > 0) ? current_config.refresh_hz : TARGET_REFRESH_HZ;
+    uint32_t target_hz = (current_config.refresh_hz > 0) ? (uint32_t)(current_config.refresh_hz + 0.5f) : TARGET_REFRESH_HZ;
     if (drm_init(&drm, target_hz)) {
         fprintf(stderr, "Failed to initialize DRM\n");
         return EXIT_FAILURE;
@@ -135,21 +136,22 @@ int main(int argc, char *argv[]) {
             fflush(stdout);
             ltc_config_t new_config = {0};
             if (config_load(config_path, &new_config) == 0) {
-                printf("[DEBUG] New config loaded: Hz=%d\n", new_config.refresh_hz);
-                printf("[DEBUG] Current config: Hz=%d\n", current_config.refresh_hz);
+                printf("[DEBUG] New config loaded: Hz=%.2f\n", new_config.refresh_hz);
+                printf("[DEBUG] Current config: Hz=%.2f\n", current_config.refresh_hz);
                 fflush(stdout);
                 
-                /* Check if refresh rate changed */
-                if (new_config.refresh_hz != current_config.refresh_hz && new_config.refresh_hz > 0) {
-                    printf("[MAIN] Refresh rate changed from %d Hz to %d Hz, reinitializing DRM...\n",
+                /* Check if refresh rate changed (with 0.01 Hz tolerance for float comparison) */
+                if (fabsf(new_config.refresh_hz - current_config.refresh_hz) > 0.01f && new_config.refresh_hz > 0) {
+                    printf("[MAIN] Refresh rate changed from %.2f Hz to %.2f Hz, reinitializing DRM...\n",
                            current_config.refresh_hz, new_config.refresh_hz);
                     fflush(stdout);
                     drm_cleanup(&drm);
-                    if (drm_init(&drm, new_config.refresh_hz) == 0) {
+                    uint32_t new_target_hz = (uint32_t)(new_config.refresh_hz + 0.5f);  // Round to nearest integer
+                    if (drm_init(&drm, new_target_hz) == 0) {
                         printf("[MAIN] DRM reinitialized successfully: %u Hz\n", drm.mode_vrefresh);
                         fflush(stdout);
                     } else {
-                        fprintf(stderr, "[MAIN] Failed to reinitialize DRM with %d Hz, exiting\n", new_config.refresh_hz);
+                        fprintf(stderr, "[MAIN] Failed to reinitialize DRM with %.2f Hz, exiting\n", new_config.refresh_hz);
                         fflush(stderr);
                         should_exit = 1;
                     }
@@ -158,7 +160,7 @@ int main(int argc, char *argv[]) {
                     fflush(stdout);
                 }
                 current_config = new_config;
-                printf("[MAIN] Config reloaded: TZ=%s, NTP=%s, Hz=%d, Pos=(%d,%d), Color=(%d,%d,%d)\n",
+                printf("[MAIN] Config reloaded: TZ=%s, NTP=%s, Hz=%.2f, Pos=(%d,%d), Color=(%d,%d,%d)\n",
                        current_config.timezone, current_config.ntp_server, current_config.refresh_hz,
                        current_config.timecode_x, current_config.timecode_y,
                        current_config.color_r, current_config.color_g, current_config.color_b);

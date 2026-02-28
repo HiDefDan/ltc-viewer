@@ -7,7 +7,7 @@ typedef struct {
     char timezone[256];           // e.g., "Europe/London"
     char ntp_server[256];         // Currently selected NTP server
     char custom_ntp_servers[2048]; // JSON array of custom servers
-    int refresh_hz;               // 50 or 60
+    float refresh_hz;             // Display refresh rate (e.g., 50.0, 59.94, 60.0)
     int timecode_x;               // X position
     int timecode_y;               // Y position
     int color_r;                  // Red component

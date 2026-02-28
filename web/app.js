@@ -18,6 +18,8 @@ class ConfigManager {
         console.log('Config loaded and form populated');
         await this.loadNtpServers();
         console.log('NTP servers loaded with custom servers');
+        await this.loadDisplayModes();
+        console.log('Display modes loaded from hardware');
         this.startNtpStatusRefresh();
         console.log('NTP status refresh started');
     }
@@ -89,6 +91,52 @@ class ConfigManager {
             this.populateNtpServerSelect();
         } catch (e) {
             console.error('Failed to load NTP servers:', e);
+        }
+    }
+
+    async loadDisplayModes() {
+        try {
+            const response = await fetch('/api/display-modes');
+            const data = await response.json();
+            if (data.modes && data.modes.length > 0) {
+                this.displayModes = data.modes;
+                this.populateRefreshRateSelect();
+            } else {
+                console.error('No display modes returned from API');
+            }
+        } catch (e) {
+            console.error('Failed to load display modes:', e);
+            // Fallback to default modes
+            this.displayModes = [50, 60];
+            this.populateRefreshRateSelect();
+        }
+    }
+
+    populateRefreshRateSelect() {
+        const select = document.getElementById('refreshHz');
+        select.innerHTML = '';
+
+        this.displayModes.forEach(mode => {
+            const option = document.createElement('option');
+            option.value = mode;
+            
+            // Format with appropriate label
+            if (mode === 59.94) {
+                option.textContent = `${mode} Hz (NTSC)`;
+            } else if (mode === 50.00 || mode === 50) {
+                option.textContent = `${mode} Hz (PAL)`;
+            } else if (mode === 60.00 || mode === 60) {
+                option.textContent = `${mode} Hz`;
+            } else {
+                option.textContent = `${mode} Hz`;
+            }
+            
+            select.appendChild(option);
+        });
+
+        // Set current value if config is loaded
+        if (this.config && this.config.refresh_hz) {
+            select.value = this.config.refresh_hz;
         }
     }
 
@@ -256,7 +304,7 @@ class ConfigManager {
         const config = {
             timezone: document.getElementById('timezone').value,
             ntp_server: document.getElementById('ntpServer').value,
-            refresh_hz: parseInt(document.getElementById('refreshHz').value),
+            refresh_hz: parseFloat(document.getElementById('refreshHz').value),
             timecode_y: parseInt(document.getElementById('timecodeY').value),
             color_r: parseInt(document.getElementById('colorR').value),
             color_g: parseInt(document.getElementById('colorG').value),
@@ -287,7 +335,27 @@ class ConfigManager {
     populateForm() {
         // Don't set timezone/region here - let setRegionFromTimezone() handle it
         document.getElementById('ntpServer').value = this.config.ntp_server || 'pool.ntp.org';
-        document.getElementById('refreshHz').value = this.config.refresh_hz || 50;
+        
+        // Set refresh rate - match config value to closest available mode
+        const configHz = this.config.refresh_hz || 50;
+        const select = document.getElementById('refreshHz');
+        let bestMatch = null;
+        let minDiff = Infinity;
+        
+        // Find closest match in available modes
+        for (let i = 0; i < select.options.length; i++) {
+            const optionValue = parseFloat(select.options[i].value);
+            const diff = Math.abs(optionValue - configHz);
+            if (diff < minDiff) {
+                minDiff = diff;
+                bestMatch = select.options[i].value;
+            }
+        }
+        
+        if (bestMatch !== null) {
+            select.value = bestMatch;
+        }
+        
         document.getElementById('timecodeY').value = this.config.timecode_y || 412;
 
         document.getElementById('colorR').value = this.config.color_r || 64;
@@ -377,7 +445,7 @@ class ConfigManager {
         const config = {
             timezone: document.getElementById('timezone').value,
             ntp_server: document.getElementById('ntpServer').value,
-            refresh_hz: parseInt(document.getElementById('refreshHz').value),
+            refresh_hz: parseFloat(document.getElementById('refreshHz').value),
             timecode_y: parseInt(document.getElementById('timecodeY').value),
             color_r: parseInt(document.getElementById('colorR').value),
             color_g: parseInt(document.getElementById('colorG').value),

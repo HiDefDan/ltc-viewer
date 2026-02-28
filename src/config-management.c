@@ -61,6 +61,21 @@ static int json_extract_int(const char *json, const char *key, int *value) {
     return 0;
 }
 
+// Simple JSON float extraction helper
+static int json_extract_float(const char *json, const char *key, float *value) {
+    char search_pattern[512];
+    snprintf(search_pattern, sizeof(search_pattern), "\"%s\":", key);
+    
+    const char *pos = strstr(json, search_pattern);
+    if (!pos) return -1;
+    
+    pos = strchr(pos, ':') + 1;
+    while (*pos && isspace(*pos)) pos++;
+    
+    *value = atof(pos);
+    return 0;
+}
+
 int config_from_json(const char *json_str, ltc_config_t *config) {
     config_default(config);
     
@@ -82,7 +97,7 @@ int config_from_json(const char *json_str, ltc_config_t *config) {
             }
         }
     }
-    json_extract_int(json_str, "refresh_hz", &config->refresh_hz);
+    json_extract_float(json_str, "refresh_hz", &config->refresh_hz);
     json_extract_int(json_str, "timecode_x", &config->timecode_x);
     json_extract_int(json_str, "timecode_y", &config->timecode_y);
     json_extract_int(json_str, "color_r", &config->color_r);
@@ -104,7 +119,7 @@ char* config_to_json(const ltc_config_t *config) {
         "  \"timezone\": \"%s\",\n"
         "  \"ntp_server\": \"%s\",\n"
         "  \"custom_ntp_servers\": %s,\n"
-        "  \"refresh_hz\": %d,\n"
+        "  \"refresh_hz\": %.2f,\n"
         "  \"timecode_x\": %d,\n"
         "  \"timecode_y\": %d,\n"
         "  \"color_r\": %d,\n"
