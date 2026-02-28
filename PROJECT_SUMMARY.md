@@ -36,9 +36,23 @@ Replace the browser-based kiosk timecode display with a low-latency, DRM/KMS-bas
 
 ### ✅ Configuration
 - Centralized hardware config (include/config.h)
-- Timezone support (Europe/London)
+- Web-based configuration dashboard (localhost:8080)
+- Timezone support with region-based selection
+- NTP server selector with:
+  - 6 built-in Stratum 0 servers (atomic clock sources)
+  - Custom server management (add/edit/delete)
+  - Real-time sync status panel
+  - System-wide application via systemd-timesyncd
 - Real-time scheduling (SCHED_FIFO, CPU 3 isolated)
 - Memory locking for deterministic operation
+
+### ✅ NTP Synchronization
+- Built-in selection of precision atomic clock servers
+- Custom NTP server support for local networks
+- REST API for server management (`/api/ntp-servers`)
+- Real-time sync status monitoring (`/api/ntp-status`)
+- Automatic systemd-timesyncd integration
+- Custom servers persist across sessions
 
 ---
 

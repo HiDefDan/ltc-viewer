@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LTC Viewer - Configuration</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>LTC Viewer Configuration</h1>
+            <p class="subtitle">System and Display Settings</p>
+        </div>
+
+        <form id="configForm" class="config-form">
+            <!-- System Settings Section -->
+            <fieldset>
+                <legend>System Settings</legend>
+                
+                <div class="form-group">
+                    <label for="timezone">Timezone</label>
+                    <div class="region-selector">
+                        <select id="region" class="region-select">
+                            <option value="">Select Region...</option>
+                        </select>
+                        <select id="timezone" class="timezone-select" required>
+                            <option value="">Select Timezone...</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>NTP Server Selection</label>
+                    <div class="ntp-server-selector">
+                        <div class="ntp-server-select-group">
+                            <select id="ntpServer" name="ntpServer" required>
+                                <option value="">Select NTP Server...</option>
+                            </select>
+                        </div>
+                        
+                        <div class="ntp-server-custom-group">
+                            <label for="ntpCustomServer">Add Custom Server:</label>
+                            <div class="custom-server-input-row">
+                                <input type="text" id="ntpCustomServer" placeholder="ntp.example.com or 192.168.1.1" />
+                                <button type="button" class="btn btn-small" id="addCustomServerBtn">Add</button>
+                            </div>
+                        </div>
+
+                        <!-- Custom servers list -->
+                        <div id="customServersList" class="custom-servers-list"></div>
+                    </div>
+                </div>
+
+                <!-- NTP Status Panel -->
+                <div id="ntpStatusPanel" class="ntp-status-panel">
+                    <div class="ntp-status-header">
+                        <h3>NTP Status</h3>
+                        <span id="ntpStatusIndicator" class="status-indicator unknown">●</span>
+                    </div>
+                    <div class="ntp-status-content">
+                        <div class="status-row">
+                            <span class="label">Server:</span>
+                            <span id="ntpStatusServer" class="value">—</span>
+                        </div>
+                        <div class="status-row">
+                            <span class="label">IP Address:</span>
+                            <span id="ntpStatusIP" class="value">—</span>
+                        </div>
+                        <div class="status-row">
+                            <span class="label">Offset:</span>
+                            <span id="ntpStatusOffset" class="value">—</span>
+                        </div>
+                        <div class="status-row">
+                            <span class="label">Status:</span>
+                            <span id="ntpStatusText" class="value">Checking...</span>
+                        </div>
+                    </div>
+                </div>
+            </fieldset>
+
+            <!-- Display Settings Section -->
+            <fieldset>
+                <legend>Display Settings</legend>
+                
+                <div class="form-group">
+                    <label for="refreshHz">Refresh Rate</label>
+                    <select id="refreshHz" name="refreshHz" required>
+                        <option value="50">50 Hz (PAL)</option>
+                        <option value="60">60 Hz (NTSC)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="timecodeY">Vertical Position</label>
+                    <input type="number" id="timecodeY" name="timecodeY" min="0" max="1080" required>
+                </div>
+
+                <div class="form-group">
+                    <label>Time of Day Color</label>
+                    <div class="color-picker-group">
+                        <div class="color-input-group">
+                            <label for="colorR">R</label>
+                            <input type="range" id="colorR" name="colorR" min="0" max="255" class="color-slider">
+                            <input type="number" id="colorRValue" min="0" max="255" class="color-value" readonly>
+                        </div>
+                        <div class="color-input-group">
+                            <label for="colorG">G</label>
+                            <input type="range" id="colorG" name="colorG" min="0" max="255" class="color-slider">
+                            <input type="number" id="colorGValue" min="0" max="255" class="color-value" readonly>
+                        </div>
+                        <div class="color-input-group">
+                            <label for="colorB">B</label>
+                            <input type="range" id="colorB" name="colorB" min="0" max="255" class="color-slider">
+                            <input type="number" id="colorBValue" min="0" max="255" class="color-value" readonly>
+                        </div>
+                        <div class="color-preview" id="colorPreview"></div>
+                    </div>
+                </div>
+            </fieldset>
+
+            <div class="button-group">
+                <button type="submit" class="btn btn-primary">Save Configuration</button>
+                <button type="button" class="btn btn-secondary" id="resetBtn">Reset to Defaults</button>
+            </div>
+
+            <div class="status-message" id="statusMessage"></div>
+        </form>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>

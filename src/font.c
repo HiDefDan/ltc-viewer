@@ -101,12 +101,10 @@ static int load_png_from_file(const char *filename, uint8_t **pixels_out,
     png_destroy_read_struct(&png, &info, NULL);
     fclose(fp);
 
-    printf("[FONT] Loaded %s: %ux%u\n", filename, *width, *height);
     return 0;
 }
 
 int font_init(void) {
-    printf("[FONT] Initializing 11 individual glyph PNGs\n");
     fflush(stdout);
 
     /* Load digits 0-9 */
@@ -144,7 +142,7 @@ int font_init(void) {
     }
     glyph_map[10].pixels_size = glyph_map[10].width * glyph_map[10].height;
 
-    printf("[FONT] Loaded 10 digits (209x256) + period (214x256)\n");
+    printf("[FONT] Glyphs loaded\n");
     fflush(stdout);
     return 0;
 }
@@ -155,13 +153,13 @@ void font_load_background(void) {
 
 void font_blit_background(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
                           uint32_t x, uint32_t y) {
-    /* Render "8.8.8.8.8.8.8.8." in near-black with subtle glow */
-    uint32_t gray_color = 0xFF0A0A0A;  /* RGB(10, 10, 10) - very dark with subtle visibility */
+    /* Render "8.8.8.8.8.8.8.8." - subtle dark gray visible on black canvas */
+    uint32_t glyph_color = 0xFF0A0A0A;  /* RGB(10, 10, 10) - dark gray, subtle but visible */
     const char *bg_pattern = "8.8.8.8.8.8.8.8.";
     
     font_blit_string(fb, fb_width, fb_height, fb_pitch,
                      x, y, bg_pattern,
-                     gray_color);
+                     glyph_color);
 }
 
 void font_blit_glyph(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,

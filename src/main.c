@@ -14,6 +14,8 @@
 #include "ltc.h"
 #include "gpio.h"
 #include "config.h"
+#include "config-management.h"
+#include "config-watcher.h"
 
 static volatile int should_exit = 0;
 
@@ -23,10 +25,14 @@ void signal_handler(int sig) {
 }
 
 int main(int argc, char *argv[]) {
+    struct timespec ts;
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    printf("[MAIN] Started at boot+%.3f seconds\n", ts.tv_sec + ts.tv_nsec/1e9);
+
     (void)argc;
     (void)argv;
 
-    printf("LTC Timecode Reader v1.0 (Raspberry Pi 5)\n");
+    printf("LTC Viewer v1.0 (Raspberry Pi 5)\n");
 
     /* Set up signal handlers */
     signal(SIGINT, signal_handler);
@@ -57,7 +63,8 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    printf("[MAIN] DRM initialized: %u Hz\n", drm.mode_vrefresh);
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    printf("[MAIN] DRM initialized: %u Hz (boot+%.3f s)\n", drm.mode_vrefresh, ts.tv_sec + ts.tv_nsec/1e9);
 
     /* Initialize bitmap font */
     if (font_init()) {
@@ -66,7 +73,9 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    printf("[MAIN] Font initialized\n");
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    printf("[MAIN] Font initialized (boot+%.3f s)\n", ts.tv_sec + ts.tv_nsec/1e9);
+    fflush(stdout);
 
     /* Load background layer (unlit 7-segment grid) */
     font_load_background();
@@ -79,7 +88,9 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    printf("[MAIN] LTC decoder initialized for %u fps\n", LTC_FRAME_RATE);
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    printf("[MAIN] LTC decoder initialized for %u fps (boot+%.3f s)\n", LTC_FRAME_RATE, ts.tv_sec + ts.tv_nsec/1e9);
+    fflush(stdout);
 
     /* Initialize GPIO for LTC edge capture */
     gpio_context_t gpio = {0};
@@ -89,15 +100,47 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    printf("[MAIN] GPIO initialized on BCM%d\n", GPIO_LTC_PIN);
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    fflush(stdout);
+    printf("[MAIN] GPIO initialized on BCM%d (boot+%.3f s)\n", GPIO_LTC_PIN, ts.tv_sec + ts.tv_nsec/1e9);
+
+    /* Initialize config watcher */
+    config_watcher_t config_watcher = {0};
+    const char *config_path = "/etc/ltc-viewer/config.json";
+    if (config_watcher_init(&config_watcher, config_path) != 0) {
+        fprintf(stderr, "Warning: Failed to initialize config watcher\n");
+    } else {
+        printf("[MAIN] Config watcher initialized for %s\n", config_path);
+    }
+
+    /* Load initial configuration */
+    ltc_config_t current_config = {0};
+    config_load(config_path, &current_config);
+    printf("[MAIN] Initial config loaded: TZ=%s, NTP=%s, Hz=%d\n",
+           current_config.timezone, current_config.ntp_server, current_config.refresh_hz);
 
     /* Main render loop */
     uint64_t frame_count = 0;
     time_t last_time_display = 0;
 
-    printf("[MAIN] Starting render loop...\n");
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    fflush(stdout);
+    printf("[MAIN] Starting render loop at boot+%.3f s\n", ts.tv_sec + ts.tv_nsec/1e9);
 
     while (!should_exit) {
+        /* Check if config file has changed */
+        if (config_watcher_check(&config_watcher) > 0) {
+            printf("[MAIN] Config file changed, reloading...\n");
+            ltc_config_t new_config = {0};
+            if (config_load(config_path, &new_config) == 0) {
+                current_config = new_config;
+                printf("[MAIN] Config reloaded: TZ=%s, NTP=%s, Hz=%d, Pos=(%d,%d), Color=(%d,%d,%d)\n",
+                       current_config.timezone, current_config.ntp_server, current_config.refresh_hz,
+                       current_config.timecode_x, current_config.timecode_y,
+                       current_config.color_r, current_config.color_g, current_config.color_b);
+            }
+        }
+
         /* Poll GPIO for edge (non-blocking stub) */
         uint64_t edge_time = 0;
         int level = 0;
@@ -112,15 +155,24 @@ int main(int argc, char *argv[]) {
             break;
         }
 
-        /* Clear framebuffer to black */
+        /* Create background color from config */
+        uint32_t bg_color = ((current_config.bg_color_r << 16) |
+                             (current_config.bg_color_g << 8) |
+                             (current_config.bg_color_b));
+
+        /* Clear framebuffer to configured background color */
         uint32_t *fb32 = (uint32_t *)back_buffer;
         for (uint32_t i = 0; i < ((DISPLAY_WIDTH * DISPLAY_HEIGHT * 4) / 4); i++) {
-            fb32[i] = COLOR_BLACK;
+            fb32[i] = bg_color;
         }
 
+        /* Background "8.8.8.8.8.8.8.8." positioned 1 digit width left of timecode */
+        uint32_t bg_x = (current_config.timecode_x > DISPLAY_DIGIT_WIDTH) ? 
+                        (current_config.timecode_x - DISPLAY_DIGIT_WIDTH) : 0;
+        
         /* Render background layer (unlit 7-segment grid) */
         font_blit_background(back_buffer, DISPLAY_WIDTH, DISPLAY_HEIGHT, drm.back.pitch,
-                            BACKGROUND_X, TIMECODE_Y);
+                            bg_x, current_config.timecode_y);
 
         /* Get current time and render timecode */
         time_t now = time(NULL);
@@ -139,15 +191,26 @@ int main(int argc, char *argv[]) {
             ltc_frame_to_string(&ltc_frame, timecode_str, sizeof(timecode_str));
         }
         
-        /* Render timecode with 7-segment font */
-        uint32_t text_x = TIMECODE_X;
-        uint32_t text_y = TIMECODE_Y;
+        /* Render timecode with configured color and position */
+        uint32_t text_x = current_config.timecode_x;
+        uint32_t text_y = current_config.timecode_y;
+        uint32_t text_color = ((current_config.color_r << 16) |
+                               (current_config.color_g << 8) |
+                               (current_config.color_b));
         
         font_blit_string(back_buffer, DISPLAY_WIDTH, DISPLAY_HEIGHT, drm.back.pitch,
                          text_x, text_y, timecode_str,
-                         COLOR_WHITE);
+                         text_color);
 
         /* Page flip (vblank-synced) */
+        static int first_frame = 1;
+        if (first_frame) {
+            clock_gettime(CLOCK_BOOTTIME, &ts);
+            printf("[MAIN] First frame ready for flip at boot+%.3f s\n", ts.tv_sec + ts.tv_nsec/1e9);
+            fflush(stdout);
+            first_frame = 0;
+        }
+
         if (drm_page_flip_sync(&drm)) {
             fprintf(stderr, "Page flip failed\n");
             break;
@@ -168,6 +231,7 @@ int main(int argc, char *argv[]) {
     printf("[MAIN] Shutting down...\n");
 
     /* Cleanup */
+    config_watcher_cleanup(&config_watcher);
     gpio_cleanup(&gpio);
     drm_cleanup(&drm);
 
