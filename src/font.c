@@ -153,40 +153,55 @@ void font_load_background(void) {
 
 void font_blit_background(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
                           uint32_t x, uint32_t y) {
+    font_blit_background_scaled(fb, fb_width, fb_height, fb_pitch, x, y, 1.0f);
+}
+
+void font_blit_background_scaled(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
+                                 uint32_t x, uint32_t y, float scale) {
     /* Render "8.8.8.8.8.8.8.8." - subtle dark gray visible on black canvas */
     uint32_t glyph_color = 0xFF191919;   /* RGB(25, 25, 25) - dark plastic, subtle but visible */
     const char *bg_pattern = "8.8.8.8.8.8.8.8.";
-    
-    font_blit_string(fb, fb_width, fb_height, fb_pitch,
-                     x, y, bg_pattern,
-                     glyph_color);
+
+    font_blit_string_scaled(fb, fb_width, fb_height, fb_pitch,
+                            x, y, bg_pattern,
+                            glyph_color, scale);
 }
 
-void font_blit_glyph(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
-                     uint32_t x, uint32_t y, char ch,
-                     uint32_t fg_color) {
-    /* Find glyph */
-    glyph_t *glyph = NULL;
+static glyph_t *font_find_glyph(char ch) {
     for (int i = 0; i < 11; i++) {
         if (glyph_map[i].ch == ch) {
-            glyph = &glyph_map[i];
-            break;
+            return &glyph_map[i];
         }
     }
+    return NULL;
+}
 
+static void font_blit_glyph_scaled_internal(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
+                                            uint32_t x, uint32_t y, char ch,
+                                            uint32_t fg_color, float scale) {
+    if (scale <= 0.0f) {
+        scale = 1.0f;
+    }
+
+    glyph_t *glyph = font_find_glyph(ch);
     if (!glyph || !glyph->pixels) {
         return;
     }
 
-    uint32_t glyph_w = glyph->width;
-    uint32_t glyph_h = glyph->height;
+    uint32_t scaled_w = (uint32_t)(glyph->width * scale + 0.5f);
+    uint32_t scaled_h = (uint32_t)(glyph->height * scale + 0.5f);
+    if (scaled_w == 0 || scaled_h == 0) {
+        return;
+    }
 
-    /* Blit glyph from individual PNG (grayscale) to ARGB8888 framebuffer */
-    for (uint32_t row = 0; row < glyph_h && (y + row) < fb_height; row++) {
-        for (uint32_t col = 0; col < glyph_w && (x + col) < fb_width; col++) {
-            uint8_t gray_val = glyph->pixels[row * glyph->width + col];
+    for (uint32_t row = 0; row < scaled_h && (y + row) < fb_height; row++) {
+        for (uint32_t col = 0; col < scaled_w && (x + col) < fb_width; col++) {
+            uint32_t src_row = (uint32_t)(row / scale);
+            uint32_t src_col = (uint32_t)(col / scale);
+            if (src_row >= glyph->height) src_row = glyph->height - 1;
+            if (src_col >= glyph->width) src_col = glyph->width - 1;
 
-            /* Only render bright pixels (> 128); skip dark pixels */
+            uint8_t gray_val = glyph->pixels[src_row * glyph->width + src_col];
             if (gray_val > 128) {
                 uint32_t pixel_offset = ((y + row) * (fb_pitch / 4)) + (x + col);
                 uint32_t *pixel_ptr = (uint32_t *)&fb[pixel_offset * 4];
@@ -196,9 +211,25 @@ void font_blit_glyph(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_
     }
 }
 
+void font_blit_glyph(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
+                     uint32_t x, uint32_t y, char ch,
+                     uint32_t fg_color) {
+    font_blit_glyph_scaled_internal(fb, fb_width, fb_height, fb_pitch, x, y, ch, fg_color, 1.0f);
+}
+
 void font_blit_string(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
                       uint32_t x, uint32_t y, const char *text,
                       uint32_t fg_color) {
+    font_blit_string_scaled(fb, fb_width, fb_height, fb_pitch, x, y, text, fg_color, 1.0f);
+}
+
+void font_blit_string_scaled(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
+                             uint32_t x, uint32_t y, const char *text,
+                             uint32_t fg_color, float scale) {
+    if (scale <= 0.0f) {
+        scale = 1.0f;
+    }
+
     uint32_t cur_x = x;
     uint32_t prev_x = x;
 
@@ -206,33 +237,34 @@ void font_blit_string(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32
         char ch = *p;
 
         /* Find glyph */
-        glyph_t *glyph = NULL;
-        for (int i = 0; i < 11; i++) {
-            if (glyph_map[i].ch == ch) {
-                glyph = &glyph_map[i];
-                break;
-            }
-        }
+        glyph_t *glyph = font_find_glyph(ch);
 
         if (!glyph || !glyph->pixels) {
             continue;
         }
+
+        uint32_t scaled_width = (uint32_t)(glyph->width * scale + 0.5f);
+        uint32_t scaled_spacing = (uint32_t)(glyph->spacing_width * scale + 0.5f);
+        if (scaled_spacing == 0 && glyph->spacing_width > 0) {
+            scaled_spacing = 1;
+        }
+        uint32_t period_lift = (uint32_t)(scale + 0.5f);
 
         /* Period overlays at same x as previous character, 1px up */
         uint32_t draw_x = cur_x;
         uint32_t draw_y = y;
         if (ch == '.') {
             draw_x = prev_x;
-            draw_y = (y > 0) ? (y - 1) : y;
+            draw_y = (y > period_lift) ? (y - period_lift) : y;
         }
 
-        if (draw_x + glyph->width > fb_width) {
+        if (draw_x + scaled_width > fb_width) {
             break;
         }
 
-        font_blit_glyph(fb, fb_width, fb_height, fb_pitch,
-                       draw_x, draw_y, ch,
-                       fg_color);
+        font_blit_glyph_scaled_internal(fb, fb_width, fb_height, fb_pitch,
+                                        draw_x, draw_y, ch,
+                                        fg_color, scale);
 
         /* Track previous x before advancing */
         if (ch != '.') {
@@ -240,6 +272,6 @@ void font_blit_string(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32
         }
 
         /* Advance cursor by spacing_width */
-        cur_x += glyph->spacing_width;
+        cur_x += scaled_spacing;
     }
 }

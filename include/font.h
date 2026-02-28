@@ -28,6 +28,10 @@ void font_load_background(void);
 void font_blit_background(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
                           uint32_t x, uint32_t y);
 
+/* Render background layer with uniform glyph scale */
+void font_blit_background_scaled(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
+                                 uint32_t x, uint32_t y, float scale);
+
 /* Render a single glyph to ARGB8888 framebuffer at (x, y).
    Only bright pixels (> 128) are written; dark pixels are skipped. */
 void font_blit_glyph(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
@@ -39,5 +43,10 @@ void font_blit_glyph(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_
 void font_blit_string(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
                       uint32_t x, uint32_t y, const char *text,
                       uint32_t fg_color);
+
+/* Render string with uniform glyph scale */
+void font_blit_string_scaled(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
+                             uint32_t x, uint32_t y, const char *text,
+                             uint32_t fg_color, float scale);
 
 #endif /* FONT_H */

@@ -7,9 +7,11 @@ typedef struct {
     char timezone[256];           // e.g., "Europe/London"
     char ntp_server[256];         // Currently selected NTP server
     char custom_ntp_servers[2048]; // JSON array of custom servers
+    int display_width;            // Target display width (mode width)
+    int display_height;           // Target display height (mode height)
     float refresh_hz;             // Display refresh rate (e.g., 50.0, 59.94, 60.0)
-    int timecode_x;               // X position
-    int timecode_y;               // Y position
+    int timecode_x_offset;        // X offset in pixels from horizontal center (±)
+    int timecode_y_offset;        // Y offset in pixels from vertical center (±)
     int color_r;                  // Red component
     int color_g;                  // Green component
     int color_b;                  // Blue component

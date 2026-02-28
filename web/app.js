@@ -1,8 +1,6 @@
-console.log('app.js loaded - hello world from app.js');
-
-const DISPLAY_HEIGHT = 1080;
-const TIME_STRING_HEIGHT = 256;
-const MAX_TIMECODE_Y = DISPLAY_HEIGHT - TIME_STRING_HEIGHT;
+const BASE_DISPLAY_WIDTH = 1920;
+const BASE_DISPLAY_HEIGHT = 1080;
+const BASE_TIME_STRING_HEIGHT = 256;
 
 class ConfigManager {
     constructor() {
@@ -11,26 +9,70 @@ class ConfigManager {
         this.init();
     }
 
-    clampTimecodeY(value) {
+    getGlyphScale(width, height) {
+        const scaleX = width / BASE_DISPLAY_WIDTH;
+        const scaleY = height / BASE_DISPLAY_HEIGHT;
+        return Math.min(scaleX, scaleY);
+    }
+
+    getScaledStringHeight(width, height) {
+        const scale = this.getGlyphScale(width, height);
+        return Math.max(1, Math.round(BASE_TIME_STRING_HEIGHT * scale));
+    }
+
+    getMaxYOffsetForResolution(width, height) {
+        const stringHeight = this.getScaledStringHeight(width, height);
+        return Math.max(0, (height - stringHeight) / 2);
+    }
+
+    clampTimecodeYOffset(value, width, height) {
         if (Number.isNaN(value)) return 0;
-        return Math.min(MAX_TIMECODE_Y, Math.max(0, value));
+        const maxOffset = this.getMaxYOffsetForResolution(width, height);
+        return Math.min(maxOffset, Math.max(-maxOffset, value));
+    }
+
+    getMaxXOffsetForResolution(width, height) {
+        return Math.max(0, width / 2);
+    }
+
+    clampTimecodeXOffset(value, width, height) {
+        if (Number.isNaN(value)) return 0;
+        const maxOffset = this.getMaxXOffsetForResolution(width, height);
+        return Math.min(maxOffset, Math.max(-maxOffset, value));
+    }
+
+    parseResolutionValue(value) {
+        const match = /^([0-9]+)x([0-9]+)$/.exec(value || '');
+        if (!match) {
+            return { width: BASE_DISPLAY_WIDTH, height: BASE_DISPLAY_HEIGHT };
+        }
+        return { width: parseInt(match[1]), height: parseInt(match[2]) };
+    }
+
+    updateTimecodeYBounds(width, height) {
+        const yInput = document.getElementById('timecodeYOffset');
+        const maxOffset = this.getMaxYOffsetForResolution(width, height);
+        yInput.max = String(Math.floor(maxOffset));
+        yInput.min = String(-Math.floor(maxOffset));
+        yInput.value = this.clampTimecodeYOffset(parseInt(yInput.value), width, height);
+    }
+
+    updateTimecodeXBounds(width, height) {
+        const xInput = document.getElementById('timecodeXOffset');
+        const maxOffset = this.getMaxXOffsetForResolution(width, height);
+        xInput.max = String(Math.floor(maxOffset));
+        xInput.min = String(-Math.floor(maxOffset));
+        xInput.value = this.clampTimecodeXOffset(parseInt(xInput.value), width, height);
     }
 
     async init() {
-        console.log('ConfigManager.init() starting...');
         this.setupEventListeners();
         await this.loadTimezoneData();
-        console.log('Timezone data loaded, regions:', Object.keys(this.tzdata.regions || {}));
         this.populateRegions();
-        console.log('Regions populated in dropdown');
         await this.loadConfig();
-        console.log('Config loaded and form populated');
         await this.loadNtpServers();
-        console.log('NTP servers loaded with custom servers');
         await this.loadDisplayModes();
-        console.log('Display modes loaded from hardware');
         this.startNtpStatusRefresh();
-        console.log('NTP status refresh started');
     }
 
     setupEventListeners() {
@@ -44,17 +86,19 @@ class ConfigManager {
             this.updateTimezoneSelect(e.target.value);
         });
 
+        document.getElementById('displayResolution').addEventListener('change', (e) => {
+            const selected = this.parseResolutionValue(e.target.value);
+            this.populateRefreshRateSelect(selected.width, selected.height);
+            this.updateTimecodeYBounds(selected.width, selected.height);
+            this.updateTimecodeXBounds(selected.width, selected.height);
+        });
+
         // Color sliders
         ['colorR', 'colorG', 'colorB'].forEach(id => {
             document.getElementById(id).addEventListener('input', (e) => {
                 document.getElementById(id + 'Value').value = e.target.value;
                 this.updateColorPreview('colorPreview');
             });
-        });
-
-        // NTP server selection
-        document.getElementById('ntpServer').addEventListener('change', (e) => {
-            console.log('NTP Server selected:', e.target.value);
         });
 
         // Add custom NTP server
@@ -109,44 +153,117 @@ class ConfigManager {
             const data = await response.json();
             if (data.modes && data.modes.length > 0) {
                 this.displayModes = data.modes;
-                this.populateRefreshRateSelect();
+                this.preferredMode = (typeof data.preferred_index === 'number' && data.modes[data.preferred_index])
+                    ? data.modes[data.preferred_index]
+                    : null;
+                this.populateResolutionSelect();
             } else {
                 console.error('No display modes returned from API');
             }
         } catch (e) {
             console.error('Failed to load display modes:', e);
-            // Fallback to default modes
-            this.displayModes = [50, 60];
-            this.populateRefreshRateSelect();
+            this.displayModes = [
+                { width: BASE_DISPLAY_WIDTH, height: BASE_DISPLAY_HEIGHT, refresh: 50.00, preferred: false },
+                { width: BASE_DISPLAY_WIDTH, height: BASE_DISPLAY_HEIGHT, refresh: 59.94, preferred: false },
+                { width: BASE_DISPLAY_WIDTH, height: BASE_DISPLAY_HEIGHT, refresh: 60.00, preferred: false }
+            ];
+            this.preferredMode = null;
+            this.populateResolutionSelect();
         }
     }
 
-    populateRefreshRateSelect() {
+    populateResolutionSelect() {
+        const resolutionSelect = document.getElementById('displayResolution');
+        resolutionSelect.innerHTML = '';
+
+        const resolutions = [];
+        this.displayModes.forEach(mode => {
+            const key = `${mode.width}x${mode.height}`;
+            if (!resolutions.find(r => r.key === key)) {
+                resolutions.push({
+                    key,
+                    width: mode.width,
+                    height: mode.height,
+                    preferred: !!mode.preferred
+                });
+            } else if (mode.preferred) {
+                const existing = resolutions.find(r => r.key === key);
+                existing.preferred = true;
+            }
+        });
+
+        resolutions.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+
+        resolutions.forEach(resolution => {
+            const option = document.createElement('option');
+            option.value = resolution.key;
+            option.textContent = `${resolution.width}x${resolution.height}${resolution.preferred ? ' (Preferred)' : ''}`;
+            resolutionSelect.appendChild(option);
+        });
+
+        let targetResolution = `${this.config.display_width || BASE_DISPLAY_WIDTH}x${this.config.display_height || BASE_DISPLAY_HEIGHT}`;
+        if (!resolutions.find(r => r.key === targetResolution)) {
+            if (this.preferredMode) {
+                targetResolution = `${this.preferredMode.width}x${this.preferredMode.height}`;
+            } else if (resolutions.length > 0) {
+                targetResolution = resolutions[0].key;
+            }
+        }
+
+        resolutionSelect.value = targetResolution;
+        const selected = this.parseResolutionValue(targetResolution);
+        this.populateRefreshRateSelect(selected.width, selected.height);
+        this.updateTimecodeYBounds(selected.width, selected.height);
+    }
+
+    populateRefreshRateSelect(width, height) {
         const select = document.getElementById('refreshHz');
         select.innerHTML = '';
 
-        this.displayModes.forEach(mode => {
+        const matchingModes = this.displayModes
+            .filter(mode => mode.width === width && mode.height === height)
+            .sort((a, b) => b.refresh - a.refresh);
+
+        matchingModes.forEach(mode => {
             const option = document.createElement('option');
-            option.value = mode;
+            option.value = Number(mode.refresh).toFixed(2);
             
-            // Format with appropriate label
-            if (mode === 59.94) {
-                option.textContent = `${mode} Hz (NTSC)`;
-            } else if (mode === 50.00 || mode === 50) {
-                option.textContent = `${mode} Hz (PAL)`;
-            } else if (mode === 60.00 || mode === 60) {
-                option.textContent = `${mode} Hz`;
+            if (Math.abs(mode.refresh - 59.94) < 0.01) {
+                option.textContent = `${Number(mode.refresh).toFixed(2)} Hz (NTSC)`;
+            } else if (Math.abs(mode.refresh - 50.0) < 0.01) {
+                option.textContent = `${Number(mode.refresh).toFixed(2)} Hz (PAL)`;
             } else {
-                option.textContent = `${mode} Hz`;
+                option.textContent = `${Number(mode.refresh).toFixed(2)} Hz`;
+            }
+
+            if (mode.preferred) {
+                option.textContent += ' (Preferred)';
             }
             
             select.appendChild(option);
         });
 
-        // Set current value if config is loaded
-        if (this.config && this.config.refresh_hz) {
-            select.value = this.config.refresh_hz;
+        if (matchingModes.length === 0) {
+            const fallback = document.createElement('option');
+            fallback.value = '50.00';
+            fallback.textContent = '50.00 Hz (Fallback)';
+            select.appendChild(fallback);
+            select.value = '50.00';
+            return;
         }
+
+        const configHz = parseFloat(this.config.refresh_hz || 50.0);
+        let best = matchingModes[0];
+        let bestDiff = Math.abs(best.refresh - configHz);
+        for (const mode of matchingModes) {
+            const diff = Math.abs(mode.refresh - configHz);
+            if (diff < bestDiff) {
+                best = mode;
+                bestDiff = diff;
+            }
+        }
+
+        select.value = Number(best.refresh).toFixed(2);
     }
 
     populateNtpServerSelect() {
@@ -310,11 +427,15 @@ class ConfigManager {
     }
 
     async saveConfig() {
+        const selectedResolution = this.parseResolutionValue(document.getElementById('displayResolution').value);
         const config = {
             timezone: document.getElementById('timezone').value,
             ntp_server: document.getElementById('ntpServer').value,
+            display_width: selectedResolution.width,
+            display_height: selectedResolution.height,
             refresh_hz: parseFloat(document.getElementById('refreshHz').value),
-            timecode_y: parseInt(document.getElementById('timecodeY').value),
+            timecode_x_offset: this.clampTimecodeXOffset(parseInt(document.getElementById('timecodeXOffset').value), selectedResolution.width, selectedResolution.height),
+            timecode_y_offset: this.clampTimecodeYOffset(parseInt(document.getElementById('timecodeYOffset').value), selectedResolution.width, selectedResolution.height),
             color_r: parseInt(document.getElementById('colorR').value),
             color_g: parseInt(document.getElementById('colorG').value),
             color_b: parseInt(document.getElementById('colorB').value),
@@ -344,30 +465,26 @@ class ConfigManager {
     populateForm() {
         // Don't set timezone/region here - let setRegionFromTimezone() handle it
         document.getElementById('ntpServer').value = this.config.ntp_server || 'pool.ntp.org';
-        
-        // Set refresh rate - match config value to closest available mode
-        const configHz = this.config.refresh_hz || 50;
-        const select = document.getElementById('refreshHz');
-        let bestMatch = null;
-        let minDiff = Infinity;
-        
-        // Find closest match in available modes
-        for (let i = 0; i < select.options.length; i++) {
-            const optionValue = parseFloat(select.options[i].value);
-            const diff = Math.abs(optionValue - configHz);
-            if (diff < minDiff) {
-                minDiff = diff;
-                bestMatch = select.options[i].value;
-            }
+        const configWidth = this.config.display_width || BASE_DISPLAY_WIDTH;
+        const configHeight = this.config.display_height || BASE_DISPLAY_HEIGHT;
+
+        if (this.displayModes && this.displayModes.length > 0) {
+            const resolutionValue = `${configWidth}x${configHeight}`;
+            document.getElementById('displayResolution').value = resolutionValue;
+            const selectedResolution = this.parseResolutionValue(document.getElementById('displayResolution').value);
+            this.populateRefreshRateSelect(selectedResolution.width, selectedResolution.height);
+            this.updateTimecodeYBounds(selectedResolution.width, selectedResolution.height);
+            this.updateTimecodeXBounds(selectedResolution.width, selectedResolution.height);
+        } else {
+            this.updateTimecodeYBounds(configWidth, configHeight);
+            this.updateTimecodeXBounds(configWidth, configHeight);
         }
-        
-        if (bestMatch !== null) {
-            select.value = bestMatch;
-        }
-        
-        const yInput = document.getElementById('timecodeY');
-        yInput.max = String(MAX_TIMECODE_Y);
-        yInput.value = this.clampTimecodeY(this.config.timecode_y || 412);
+
+        const yInput = document.getElementById('timecodeYOffset');
+        yInput.value = this.clampTimecodeYOffset(this.config.timecode_y_offset || 0, configWidth, configHeight);
+
+        const xInput = document.getElementById('timecodeXOffset');
+        xInput.value = this.clampTimecodeXOffset(this.config.timecode_x_offset || 0, configWidth, configHeight);
 
         document.getElementById('colorR').value = this.config.color_r || 64;
         document.getElementById('colorRValue').value = this.config.color_r || 64;
@@ -386,19 +503,15 @@ class ConfigManager {
             return;
         }
 
-        console.log('setRegionFromTimezone called with:', tz);
-
         // Find region containing this timezone
         for (const [region, zones] of Object.entries(this.tzdata.regions)) {
             if (zones.includes(tz)) {
-                console.log('Found region:', region, 'for timezone:', tz);
                 document.getElementById('region').value = region;
                 this.updateTimezoneSelect(region);
                 // Give the DOM a moment to update before setting the value
                 setTimeout(() => {
                     const tzSelect = document.getElementById('timezone');
                     tzSelect.value = tz;
-                    console.log('Set timezone value to:', tz, 'actual value:', tzSelect.value);
                 }, 10);
                 return;
             }
@@ -430,7 +543,6 @@ class ConfigManager {
         timezoneSelect.innerHTML = '<option value="">Select Timezone...</option>';
 
         const zones = this.tzdata.regions[region] || [];
-        console.log('updateTimezoneSelect: region:', region, 'zones:', zones);
         
         zones.forEach(zone => {
             const option = document.createElement('option');
@@ -438,8 +550,6 @@ class ConfigManager {
             option.textContent = zone.replace('_', ' ').split('/').pop();
             timezoneSelect.appendChild(option);
         });
-        
-        console.log('updateTimezoneSelect: created', zones.length, 'options');
     }
     updateColorPreview(previewId) {
         const preview = document.getElementById(previewId);
@@ -453,15 +563,22 @@ class ConfigManager {
     async handleSubmit(e) {
         e.preventDefault();
 
-        const yInput = document.getElementById('timecodeY');
-        const clampedY = this.clampTimecodeY(parseInt(yInput.value));
+        const selectedResolution = this.parseResolutionValue(document.getElementById('displayResolution').value);
+        const yInput = document.getElementById('timecodeYOffset');
+        const xInput = document.getElementById('timecodeXOffset');
+        const clampedY = this.clampTimecodeYOffset(parseInt(yInput.value), selectedResolution.width, selectedResolution.height);
+        const clampedX = this.clampTimecodeXOffset(parseInt(xInput.value), selectedResolution.width, selectedResolution.height);
         yInput.value = clampedY;
+        xInput.value = clampedX;
 
         const config = {
             timezone: document.getElementById('timezone').value,
             ntp_server: document.getElementById('ntpServer').value,
+            display_width: selectedResolution.width,
+            display_height: selectedResolution.height,
             refresh_hz: parseFloat(document.getElementById('refreshHz').value),
-            timecode_y: clampedY,
+            timecode_x_offset: clampedX,
+            timecode_y_offset: clampedY,
             color_r: parseInt(document.getElementById('colorR').value),
             color_g: parseInt(document.getElementById('colorG').value),
             color_b: parseInt(document.getElementById('colorB').value),
@@ -494,8 +611,13 @@ class ConfigManager {
         if (confirm('Reset all settings to defaults?')) {
             document.getElementById('timezone').value = 'Europe/London';
             document.getElementById('ntpServer').value = 'pool.ntp.org';
-            document.getElementById('refreshHz').value = 50;
-            document.getElementById('timecodeY').value = 412;
+            document.getElementById('displayResolution').value = `${BASE_DISPLAY_WIDTH}x${BASE_DISPLAY_HEIGHT}`;
+            this.populateRefreshRateSelect(BASE_DISPLAY_WIDTH, BASE_DISPLAY_HEIGHT);
+            document.getElementById('refreshHz').value = '50.00';
+            this.updateTimecodeYBounds(BASE_DISPLAY_WIDTH, BASE_DISPLAY_HEIGHT);
+            this.updateTimecodeXBounds(BASE_DISPLAY_WIDTH, BASE_DISPLAY_HEIGHT);
+            document.getElementById('timecodeYOffset').value = 0;
+            document.getElementById('timecodeXOffset').value = 0;
 
             document.getElementById('colorR').value = 64;
             document.getElementById('colorRValue').value = 64;

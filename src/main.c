@@ -69,19 +69,25 @@ int main(int argc, char *argv[]) {
     /* Load initial configuration BEFORE DRM init */
     ltc_config_t current_config = {0};
     config_load(config_path, &current_config);
-    printf("[MAIN] Initial config loaded: TZ=%s, NTP=%s, Hz=%.2f\n",
-           current_config.timezone, current_config.ntp_server, current_config.refresh_hz);
+        printf("[MAIN] Initial config loaded: TZ=%s, NTP=%s, Mode=%dx%d@%.2f\n",
+            current_config.timezone, current_config.ntp_server,
+            current_config.display_width, current_config.display_height, current_config.refresh_hz);
 
     /* Initialize DRM for framebuffer rendering with config refresh rate */
     ltc_drm_context_t drm = {0};
-    uint32_t target_hz = (current_config.refresh_hz > 0) ? (uint32_t)(current_config.refresh_hz + 0.5f) : TARGET_REFRESH_HZ;
-    if (drm_init(&drm, target_hz)) {
+    float target_hz = (current_config.refresh_hz > 0.0f) ? current_config.refresh_hz : (float)TARGET_REFRESH_HZ;
+    if (drm_init(&drm, (uint32_t)current_config.display_width, (uint32_t)current_config.display_height, target_hz)) {
         fprintf(stderr, "Failed to initialize DRM\n");
         return EXIT_FAILURE;
     }
 
     clock_gettime(CLOCK_BOOTTIME, &ts);
-    printf("[MAIN] DRM initialized: %u Hz (boot+%.3f s)\n", drm.mode_vrefresh, ts.tv_sec + ts.tv_nsec/1e9);
+    printf("[MAIN] DRM initialized: %.2f Hz (boot+%.3f s)\n", drm.mode_refresh_hz, ts.tv_sec + ts.tv_nsec/1e9);
+
+    /* Update current_config to reflect what DRM actually selected */
+    current_config.display_width = drm.front.hdisplay;
+    current_config.display_height = drm.front.vdisplay;
+    current_config.refresh_hz = drm.mode_refresh_hz;
 
     /* Initialize bitmap font */
     if (font_init()) {
@@ -136,33 +142,38 @@ int main(int argc, char *argv[]) {
             fflush(stdout);
             ltc_config_t new_config = {0};
             if (config_load(config_path, &new_config) == 0) {
-                printf("[DEBUG] New config loaded: Hz=%.2f\n", new_config.refresh_hz);
-                printf("[DEBUG] Current config: Hz=%.2f\n", current_config.refresh_hz);
-                fflush(stdout);
-                
-                /* Check if refresh rate changed (with 0.01 Hz tolerance for float comparison) */
-                if (fabsf(new_config.refresh_hz - current_config.refresh_hz) > 0.01f && new_config.refresh_hz > 0) {
-                    printf("[MAIN] Refresh rate changed from %.2f Hz to %.2f Hz, reinitializing DRM...\n",
-                           current_config.refresh_hz, new_config.refresh_hz);
+                  /* Check if mode changed */
+                  int refresh_changed = (fabsf(new_config.refresh_hz - current_config.refresh_hz) > 0.01f && new_config.refresh_hz > 0);
+                  int resolution_changed = (new_config.display_width != current_config.display_width ||
+                                new_config.display_height != current_config.display_height);
+
+                  if (refresh_changed || resolution_changed) {
+                      printf("[MAIN] Display mode changed from %dx%d@%.2f to %dx%d@%.2f, reinitializing DRM...\n",
+                          current_config.display_width, current_config.display_height, current_config.refresh_hz,
+                          new_config.display_width, new_config.display_height, new_config.refresh_hz);
                     fflush(stdout);
                     drm_cleanup(&drm);
-                    uint32_t new_target_hz = (uint32_t)(new_config.refresh_hz + 0.5f);  // Round to nearest integer
-                    if (drm_init(&drm, new_target_hz) == 0) {
-                        printf("[MAIN] DRM reinitialized successfully: %u Hz\n", drm.mode_vrefresh);
+                    float new_target_hz = new_config.refresh_hz;
+                      if (drm_init(&drm, (uint32_t)new_config.display_width, (uint32_t)new_config.display_height, new_target_hz) == 0) {
+                       printf("[MAIN] DRM reinitialized successfully: %ux%u @ %.2f Hz\n",
+                           drm.front.hdisplay, drm.front.vdisplay, drm.mode_refresh_hz);
                         fflush(stdout);
+                        /* Update new_config to reflect what DRM actually selected */
+                        new_config.display_width = drm.front.hdisplay;
+                        new_config.display_height = drm.front.vdisplay;
+                        new_config.refresh_hz = drm.mode_refresh_hz;
                     } else {
-                        fprintf(stderr, "[MAIN] Failed to reinitialize DRM with %.2f Hz, exiting\n", new_config.refresh_hz);
+                       fprintf(stderr, "[MAIN] Failed to reinitialize DRM with %dx%d@%.2f, exiting\n",
+                            new_config.display_width, new_config.display_height, new_config.refresh_hz);
                         fflush(stderr);
                         should_exit = 1;
                     }
-                } else {
-                    printf("[DEBUG] No refresh rate change detected or invalid Hz\n");
-                    fflush(stdout);
                 }
                 current_config = new_config;
-                printf("[MAIN] Config reloaded: TZ=%s, NTP=%s, Hz=%.2f, Pos=(%d,%d), Color=(%d,%d,%d)\n",
-                       current_config.timezone, current_config.ntp_server, current_config.refresh_hz,
-                       current_config.timecode_x, current_config.timecode_y,
+                  printf("[MAIN] Config reloaded: TZ=%s, NTP=%s, Mode=%dx%d@%.2f, Pos=(+%d,+%d), Color=(%d,%d,%d)\n",
+                      current_config.timezone, current_config.ntp_server,
+                      current_config.display_width, current_config.display_height, current_config.refresh_hz,
+                       current_config.timecode_x_offset, current_config.timecode_y_offset,
                        current_config.color_r, current_config.color_g, current_config.color_b);
                 fflush(stdout);
             }
@@ -182,6 +193,16 @@ int main(int argc, char *argv[]) {
             break;
         }
 
+        uint32_t render_width = drm.back.hdisplay;
+        uint32_t render_height = drm.back.vdisplay;
+
+        float scale_x = (float)render_width / (float)DISPLAY_WIDTH;
+        float scale_y = (float)render_height / (float)DISPLAY_HEIGHT;
+        float glyph_scale = (scale_x < scale_y) ? scale_x : scale_y;
+        if (glyph_scale <= 0.0f) {
+            glyph_scale = 1.0f;
+        }
+
         /* Create background color from config */
         uint32_t bg_color = ((current_config.bg_color_r << 16) |
                              (current_config.bg_color_g << 8) |
@@ -189,17 +210,49 @@ int main(int argc, char *argv[]) {
 
         /* Clear framebuffer to configured background color */
         uint32_t *fb32 = (uint32_t *)back_buffer;
-        for (uint32_t i = 0; i < ((DISPLAY_WIDTH * DISPLAY_HEIGHT * 4) / 4); i++) {
+        uint32_t pixels = (drm.back.pitch / 4) * render_height;
+        for (uint32_t i = 0; i < pixels; i++) {
             fb32[i] = bg_color;
         }
 
+        /* Calculate scaled glyph height for vertical centering */
+        uint32_t scaled_glyph_height = (uint32_t)(256.0f * glyph_scale + 0.5f);
+        
+        /* Calculate vertical center and apply offset */
+        uint32_t center_y = (render_height > scaled_glyph_height) ?
+                           ((render_height - scaled_glyph_height) / 2) : 0;
+        uint32_t text_y_final = center_y + current_config.timecode_y_offset;
+        /* Clamp to valid range */
+        if (text_y_final > render_height - scaled_glyph_height) {
+            text_y_final = render_height - scaled_glyph_height;
+        }
+
+        /* Calculate scaled string width for horizontal centering */
+        /* Timecode is "HH.MM.SS" = 6 digits + 2 periods (periods overlay, spacing=0) */
+        uint32_t base_string_width = 6 * DISPLAY_DIGIT_WIDTH;  /* 1254px at 1080p baseline */
+        uint32_t scaled_string_width = (uint32_t)(base_string_width * glyph_scale + 0.5f);
+        
+        /* Calculate horizontal center and apply offset */
+        uint32_t center_x = (render_width > scaled_string_width) ?
+                           ((render_width - scaled_string_width) / 2) : 0;
+        uint32_t text_x_final = center_x + current_config.timecode_x_offset;
+        /* Clamp to valid range */
+        if (text_x_final + scaled_string_width > render_width) {
+            text_x_final = render_width - scaled_string_width;
+        }
+        if ((int32_t)text_x_final < 0) {
+            text_x_final = 0;
+        }
+
         /* Background "8.8.8.8.8.8.8.8." positioned 1 digit width left of timecode */
-        uint32_t bg_x = (current_config.timecode_x > DISPLAY_DIGIT_WIDTH) ? 
-                        (current_config.timecode_x - DISPLAY_DIGIT_WIDTH) : 0;
+        /* Config X offset centers the background relative to screen */
+        uint32_t scaled_digit_width = (uint32_t)(DISPLAY_DIGIT_WIDTH * glyph_scale + 0.5f);
+        uint32_t bg_x = (text_x_final > scaled_digit_width) ?
+                (text_x_final - scaled_digit_width) : 0;
         
         /* Render background layer (unlit 7-segment grid) */
-        font_blit_background(back_buffer, DISPLAY_WIDTH, DISPLAY_HEIGHT, drm.back.pitch,
-                            bg_x, current_config.timecode_y);
+        font_blit_background_scaled(back_buffer, render_width, render_height, drm.back.pitch,
+                        bg_x, text_y_final, glyph_scale);
 
         /* Get current time and render timecode */
         time_t now = time(NULL);
@@ -219,15 +272,16 @@ int main(int argc, char *argv[]) {
         }
         
         /* Render timecode with configured color and position */
-        uint32_t text_x = current_config.timecode_x;
-        uint32_t text_y = current_config.timecode_y;
+        /* Use center-relative offsets for both X and Y */
+        uint32_t text_x = text_x_final;
+        uint32_t text_y = text_y_final;
         uint32_t text_color = ((current_config.color_r << 16) |
                                (current_config.color_g << 8) |
                                (current_config.color_b));
         
-        font_blit_string(back_buffer, DISPLAY_WIDTH, DISPLAY_HEIGHT, drm.back.pitch,
-                         text_x, text_y, timecode_str,
-                         text_color);
+        font_blit_string_scaled(back_buffer, render_width, render_height, drm.back.pitch,
+                    text_x, text_y, timecode_str,
+                    text_color, glyph_scale);
 
         /* Page flip (vblank-synced) */
         static int first_frame = 1;
@@ -249,12 +303,6 @@ int main(int argc, char *argv[]) {
         /* Log status every ~5 seconds */
         if ((frame_count % (5 * drm.mode_vrefresh)) == 0) {
             printf("[MAIN] Frame %" PRIu64 ", Timecode: %s\n", frame_count, timecode_str);
-            fflush(stdout);
-        }
-        
-        /* Debug: log every N frames */
-        if ((frame_count % 250) == 0 && frame_count > 0) {
-            printf("[DEBUG] Rendered frame %" PRIu64 "\n", frame_count);
             fflush(stdout);
         }
 

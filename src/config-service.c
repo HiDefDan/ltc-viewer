@@ -435,9 +435,9 @@ static int handle_get_ntp_servers(struct MHD_Connection *conn) {
 }
 
 static int handle_get_display_modes(struct MHD_Connection *conn) {
-    /* Query DRM device for available display modes at target resolution */
+    /* Query DRM device for available display modes */
     int fd = -1;
-    char response[4096];
+    char response[16384];
     
     /* Open DRM device */
     for (int i = 0; i < 16; i++) {
@@ -475,7 +475,6 @@ static int handle_get_display_modes(struct MHD_Connection *conn) {
                            MHD_HTTP_INTERNAL_SERVER_ERROR, "application/json");
     }
     
-    uint32_t connector_id = 0;
     drmModeConnector *conn_drm = NULL;
     
     for (int i = 0; i < res->count_connectors; i++) {
@@ -485,7 +484,6 @@ static int handle_get_display_modes(struct MHD_Connection *conn) {
         if ((conn_drm->connector_type == DRM_MODE_CONNECTOR_HDMIA ||
              conn_drm->connector_type == DRM_MODE_CONNECTOR_HDMIB) &&
             conn_drm->connection == DRM_MODE_CONNECTED) {
-            connector_id = res->connectors[i];
             break;
         }
         drmModeFreeConnector(conn_drm);
@@ -501,54 +499,156 @@ static int handle_get_display_modes(struct MHD_Connection *conn) {
                            MHD_HTTP_NOT_FOUND, "application/json");
     }
     
-    /* Extract unique refresh rates for target resolution (1920x1080) */
-    char *pos = response;
-    int remaining = sizeof(response);
-    int written = snprintf(pos, remaining, "{\"modes\": [");
-    pos += written;
-    remaining -= written;
-    
-    int found_count = 0;
-    float seen_rates[32] = {0};  /* Track seen refresh rates with decimal precision */
-    
-    for (int i = 0; i < conn_drm->count_modes && found_count < 32; i++) {
+    /* First pass: collect all unique resolutions and refresh rates */
+    typedef struct {
+        uint32_t width;
+        uint32_t height;
+        float refresh;
+        int is_preferred;
+    } mode_entry_t;
+
+    typedef struct {
+        uint32_t width;
+        uint32_t height;
+    } resolution_t;
+
+    typedef struct {
+        float refresh;
+    } refresh_rate_t;
+
+    mode_entry_t all_modes[512];
+    int all_modes_count = 0;
+    resolution_t unique_resolutions[128];
+    int unique_resolutions_count = 0;
+    refresh_rate_t unique_refresh_rates[64];
+    int unique_refresh_rates_count = 0;
+
+    /* Collect all modes from connector */
+    for (int i = 0; i < conn_drm->count_modes && all_modes_count < 512; i++) {
         drmModeModeInfo *mode = &conn_drm->modes[i];
-        
-        /* Only include modes at target resolution */
-        if (mode->hdisplay != DISPLAY_WIDTH || mode->vdisplay != DISPLAY_HEIGHT) {
-            continue;
-        }
-        
-        /* Calculate actual refresh rate from timings for precision (60.00 vs 59.94) */
         float actual_refresh = (float)mode->clock * 1000.0f / 
                                ((float)mode->htotal * (float)mode->vtotal);
-        
-        /* Check if we've already seen this refresh rate (within 0.01 Hz tolerance) */
+        int is_preferred = (mode->type & DRM_MODE_TYPE_PREFERRED) ? 1 : 0;
+
+        /* De-duplicate exact mode entries */
         int duplicate = 0;
-        for (int j = 0; j < found_count; j++) {
-            if (fabsf(seen_rates[j] - actual_refresh) < 0.01f) {
+        for (int j = 0; j < all_modes_count; j++) {
+            if (all_modes[j].width == mode->hdisplay &&
+                all_modes[j].height == mode->vdisplay &&
+                fabsf(all_modes[j].refresh - actual_refresh) < 0.01f) {
                 duplicate = 1;
                 break;
             }
         }
-        
+
         if (!duplicate) {
-            if (found_count > 0 && remaining > 2) {
-                written = snprintf(pos, remaining, ", ");
-                pos += written;
-                remaining -= written;
-            }
-            
-            /* Output with 2 decimal places to distinguish 60.00 from 59.94 */
-            written = snprintf(pos, remaining, "%.2f", actual_refresh);
-            pos += written;
-            remaining -= written;
-            
-            seen_rates[found_count++] = actual_refresh;
+            all_modes[all_modes_count].width = mode->hdisplay;
+            all_modes[all_modes_count].height = mode->vdisplay;
+            all_modes[all_modes_count].refresh = actual_refresh;
+            all_modes[all_modes_count].is_preferred = is_preferred;
+            all_modes_count++;
         }
     }
+
+    /* Extract unique resolutions */
+    for (int i = 0; i < all_modes_count && unique_resolutions_count < 128; i++) {
+        int duplicate = 0;
+        for (int j = 0; j < unique_resolutions_count; j++) {
+            if (unique_resolutions[j].width == all_modes[i].width &&
+                unique_resolutions[j].height == all_modes[i].height) {
+                duplicate = 1;
+                break;
+            }
+        }
+        if (!duplicate) {
+            unique_resolutions[unique_resolutions_count].width = all_modes[i].width;
+            unique_resolutions[unique_resolutions_count].height = all_modes[i].height;
+            unique_resolutions_count++;
+        }
+    }
+
+    /* Extract unique refresh rates globally (if 50Hz exists anywhere, offer at all resolutions) */
+    for (int i = 0; i < all_modes_count && unique_refresh_rates_count < 64; i++) {
+        int duplicate = 0;
+        for (int j = 0; j < unique_refresh_rates_count; j++) {
+            if (fabsf(unique_refresh_rates[j].refresh - all_modes[i].refresh) < 0.01f) {
+                duplicate = 1;
+                break;
+            }
+        }
+        if (!duplicate) {
+            unique_refresh_rates[unique_refresh_rates_count].refresh = all_modes[i].refresh;
+            unique_refresh_rates_count++;
+        }
+    }
+
+    /* Sort refresh rates descending */
+    for (int i = 0; i < unique_refresh_rates_count - 1; i++) {
+        for (int j = i + 1; j < unique_refresh_rates_count; j++) {
+            if (unique_refresh_rates[j].refresh > unique_refresh_rates[i].refresh) {
+                float tmp = unique_refresh_rates[i].refresh;
+                unique_refresh_rates[i].refresh = unique_refresh_rates[j].refresh;
+                unique_refresh_rates[j].refresh = tmp;
+            }
+        }
+    }
+
+    /* Second pass: emit all combinations of resolution × refresh rate */
+    char *pos = response;
+    int remaining = sizeof(response);
+    int written = snprintf(pos, remaining, "{\"modes\":[");
+    pos += written;
+    remaining -= written;
     
-    written = snprintf(pos, remaining, "]}");
+    int emitted = 0;
+    int preferred_index = -1;
+
+    /* For each combination, find if it exists in all_modes and use its preferred flag */
+    for (int r = 0; r < unique_resolutions_count; r++) {
+        for (int f = 0; f < unique_refresh_rates_count; f++) {
+            uint32_t width = unique_resolutions[r].width;
+            uint32_t height = unique_resolutions[r].height;
+            float refresh = unique_refresh_rates[f].refresh;
+
+            /* Find mode entry for this combination (if it exists) */
+            int is_preferred = 0;
+            for (int m = 0; m < all_modes_count; m++) {
+                if (all_modes[m].width == width &&
+                    all_modes[m].height == height &&
+                    fabsf(all_modes[m].refresh - refresh) < 0.01f) {
+                    is_preferred = all_modes[m].is_preferred;
+                    break;
+                }
+            }
+
+            /* Always emit the mode (even if not in DRM list, monitor usually supports it) */
+            if (remaining > 100 && emitted < 512) {
+                if (emitted > 0) {
+                    written = snprintf(pos, remaining, ", ");
+                    pos += written;
+                    remaining -= written;
+                }
+
+                written = snprintf(pos, remaining,
+                                   "{\"width\":%u,\"height\":%u,\"refresh\":%.2f,\"preferred\":%s}",
+                                   width, height, refresh,
+                                   is_preferred ? "true" : "false");
+                pos += written;
+                remaining -= written;
+
+                if (is_preferred && preferred_index < 0) {
+                    preferred_index = emitted;
+                }
+                emitted++;
+            }
+        }
+    }
+
+    if (preferred_index >= 0) {
+        written = snprintf(pos, remaining, "],\"preferred_index\":%d}", preferred_index);
+    } else {
+        written = snprintf(pos, remaining, "]}");
+    }
     
     drmModeFreeConnector(conn_drm);
     drmModeFreeResources(res);

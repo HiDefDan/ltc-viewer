@@ -27,11 +27,12 @@ typedef struct {
     ltc_drm_framebuffer_t back;
     ltc_drm_framebuffer_t current;
     void *current_mode;              /* drmModeModeInfo * (void* to avoid header collision) */
-    uint32_t mode_vrefresh;         /* 48, 50, or 60 Hz */
+    uint32_t mode_vrefresh;          /* Integer vrefresh (legacy) */
+    float mode_refresh_hz;           /* Exact refresh (e.g., 59.94) */
 } ltc_drm_context_t;
 
 /* Initialize DRM, find best HDMI mode, set up buffers */
-int drm_init(ltc_drm_context_t *ctx, uint32_t target_vrefresh);
+int drm_init(ltc_drm_context_t *ctx, uint32_t target_width, uint32_t target_height, float target_vrefresh);
 
 /* Clean up DRM resources */
 void drm_cleanup(ltc_drm_context_t *ctx);

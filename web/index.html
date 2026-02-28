@@ -82,6 +82,13 @@
             <!-- Display Settings Section -->
             <fieldset>
                 <legend>Display Settings</legend>
+
+                <div class="form-group">
+                    <label for="displayResolution">Resolution</label>
+                    <select id="displayResolution" name="displayResolution" required>
+                        <option value="">Loading modes...</option>
+                    </select>
+                </div>
                 
                 <div class="form-group">
                     <label for="refreshHz">Refresh Rate</label>
@@ -91,8 +98,15 @@
                 </div>
 
                 <div class="form-group">
-                    <label for="timecodeY">Vertical Position</label>
-                    <input type="number" id="timecodeY" name="timecodeY" min="0" max="824" required>
+                    <label for="timecodeYOffset">Vertical Offset (pixels)</label>
+                    <input type="number" id="timecodeYOffset" name="timecodeYOffset" min="-500" max="500" value="0" required>
+                    <small>Positive = lower, Negative = higher (within display bounds)</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="timecodeXOffset">Horizontal Offset (pixels)</label>
+                    <input type="number" id="timecodeXOffset" name="timecodeXOffset" min="-500" max="500" value="0" required>
+                    <small>Positive = right, Negative = left (within display bounds)</small>
                 </div>
 
                 <div class="form-group">

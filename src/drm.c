@@ -9,6 +9,7 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 #include <stddef.h>
+#include <math.h>
 
 /* Define deprecated types that libdrm headers may reference but don't define */
 typedef unsigned int drm_handle_t;
@@ -57,39 +58,83 @@ static int find_hdmi_connector(int fd, uint32_t *connector_id) {
     return -1;
 }
 
-/* Find best matching mode for target refresh rate */
-static drmModeModeInfo *find_mode_by_refresh(drmModeConnector *conn, uint32_t target_refresh) {
-    printf("[DRM] Looking for mode: %ux%u @ %u Hz. Available modes:\n", DISPLAY_WIDTH, DISPLAY_HEIGHT, target_refresh);
-    fflush(stdout);
-    
+static int has_exact_mode(drmModeConnector *conn, uint32_t target_width, uint32_t target_height, float target_refresh) {
     for (int i = 0; i < conn->count_modes; i++) {
         drmModeModeInfo *mode = &conn->modes[i];
-        printf("[DRM]   Mode %d: %ux%u @ %u Hz (checking: res=%d, hz=%d)\n", i, mode->hdisplay, mode->vdisplay, mode->vrefresh,
-               (mode->hdisplay == DISPLAY_WIDTH && mode->vdisplay == DISPLAY_HEIGHT),
-               (mode->vrefresh == target_refresh));
-        fflush(stdout);
-        
-        if (mode->vrefresh == target_refresh &&
-            mode->hdisplay == DISPLAY_WIDTH &&
-            mode->vdisplay == DISPLAY_HEIGHT) {
-            printf("[DRM] Found exact match at mode %d: %ux%u @ %u Hz!\n", i, mode->hdisplay, mode->vdisplay, mode->vrefresh);
-            fflush(stdout);
-            return mode;
+        float actual_refresh = (float)mode->clock * 1000.0f / ((float)mode->htotal * (float)mode->vtotal);
+        if (mode->hdisplay == target_width &&
+            mode->vdisplay == target_height &&
+            fabsf(actual_refresh - target_refresh) < 0.02f) {
+            return 1;
         }
     }
-    
-    printf("[DRM] No exact match found, trying fallback\n");
+    return 0;
+}
+
+static void make_cea_861_uhd50_mode(drmModeModeInfo *mode) {
+    memset(mode, 0, sizeof(*mode));
+
+    mode->clock = 594000;
+    mode->hdisplay = 3840;
+    mode->hsync_start = 4896;
+    mode->hsync_end = 4984;
+    mode->htotal = 5280;
+    mode->hskew = 0;
+
+    mode->vdisplay = 2160;
+    mode->vsync_start = 2168;
+    mode->vsync_end = 2178;
+    mode->vtotal = 2250;
+    mode->vscan = 0;
+
+    mode->vrefresh = 50;
+    mode->flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC;
+    mode->type = DRM_MODE_TYPE_DRIVER;
+    strncpy(mode->name, "3840x2160", sizeof(mode->name) - 1);
+}
+
+/* Find best matching mode for target resolution and refresh rate */
+static drmModeModeInfo *find_mode(drmModeConnector *conn, uint32_t target_width, uint32_t target_height, float target_refresh) {
+    printf("[DRM] Looking for mode: %ux%u @ %.2f Hz. Available modes:\n", target_width, target_height, target_refresh);
     fflush(stdout);
-    
-    /* Fallback: try to find closest refresh rate at correct resolution */
+
+    drmModeModeInfo *best_mode = NULL;
+    float best_diff = 1000.0f;
+
     for (int i = 0; i < conn->count_modes; i++) {
         drmModeModeInfo *mode = &conn->modes[i];
-        if (mode->hdisplay == DISPLAY_WIDTH && mode->vdisplay == DISPLAY_HEIGHT) {
-            printf("[DRM] Fallback: using mode %d: %ux%u @ %u Hz (requested %u Hz)\n", 
-                   i, mode->hdisplay, mode->vdisplay, mode->vrefresh, target_refresh);
+        float actual_refresh = (float)mode->clock * 1000.0f / ((float)mode->htotal * (float)mode->vtotal);
+        int is_target_resolution = (mode->hdisplay == target_width && mode->vdisplay == target_height);
+        float diff = fabsf(actual_refresh - target_refresh);
+        int is_exact_refresh = (diff < 0.02f);
+
+        printf("[DRM]   Mode %d: %ux%u @ %.2f Hz (checking: res=%d, hz=%d)\n",
+               i, mode->hdisplay, mode->vdisplay, actual_refresh,
+               is_target_resolution, is_exact_refresh);
+        fflush(stdout);
+
+        if (is_target_resolution && is_exact_refresh) {
+            printf("[DRM] Found exact match at mode %d: %ux%u @ %.2f Hz!\n",
+                   i, mode->hdisplay, mode->vdisplay, actual_refresh);
             fflush(stdout);
             return mode;
         }
+
+        if (is_target_resolution && diff < best_diff) {
+            best_diff = diff;
+            best_mode = mode;
+        }
+    }
+
+    printf("[DRM] No exact match found, trying closest refresh fallback\n");
+    fflush(stdout);
+
+    if (best_mode) {
+        float best_refresh = (float)best_mode->clock * 1000.0f / ((float)best_mode->htotal * (float)best_mode->vtotal);
+        printf("[DRM] Fallback: using closest mode %ux%u @ %.2f Hz (requested %.2f Hz)\n",
+               best_mode->hdisplay, best_mode->vdisplay, best_refresh, target_refresh);
+        fflush(stdout);
+        return best_mode;
     }
     
     /* Last resort: use first mode */
@@ -154,8 +199,8 @@ static int allocate_dumb_buffer(int fd, ltc_drm_framebuffer_t *fb, uint32_t widt
     return 0;
 }
 
-int drm_init(ltc_drm_context_t *ctx, uint32_t target_vrefresh) {
-    printf("[DRM] drm_init called with target_vrefresh=%u\n", target_vrefresh);
+int drm_init(ltc_drm_context_t *ctx, uint32_t target_width, uint32_t target_height, float target_vrefresh) {
+    printf("[DRM] drm_init called with target=%ux%u@%.2f\n", target_width, target_height, target_vrefresh);
     fflush(stdout);
     memset(ctx, 0, sizeof(*ctx));
 
@@ -203,18 +248,18 @@ int drm_init(ltc_drm_context_t *ctx, uint32_t target_vrefresh) {
         return -1;
     }
 
-    printf("[DRM] Got connector with %d modes. Searching for target=%u Hz...\n", conn->count_modes, target_vrefresh);
+    printf("[DRM] Got connector with %d modes. Searching for target=%.2f Hz...\n", conn->count_modes, target_vrefresh);
     fflush(stdout);
 
     /* Find best mode */
-    drmModeModeInfo *mode = find_mode_by_refresh(conn, target_vrefresh);
+    drmModeModeInfo *mode = find_mode(conn, target_width, target_height, target_vrefresh);
     fflush(stdout);
 
     if (!mode) {
         /* No exact match - use first available mode */
         if (conn->count_modes > 0) {
             mode = &conn->modes[0];
-            printf("[DRM] No mode matching %u Hz, using first available: %ux%u@%u\n",
+            printf("[DRM] No mode matching %.2f Hz, using first available: %ux%u@%u\n",
                    target_vrefresh, mode->hdisplay, mode->vdisplay, mode->vrefresh);
         } else {
             fprintf(stderr, "No modes available on connector\n");
@@ -224,13 +269,25 @@ int drm_init(ltc_drm_context_t *ctx, uint32_t target_vrefresh) {
         }
     }
 
+    int request_uhd50 = (target_width == 3840 && target_height == 2160 && fabsf(target_vrefresh - 50.0f) < 0.02f);
+    int have_exact_uhd50 = has_exact_mode(conn, target_width, target_height, target_vrefresh);
+    int forced_uhd50 = 0;
+
     drmModeModeInfo target_mode = *mode;
-    ctx->mode_vrefresh = mode->vrefresh;
+    if (request_uhd50 && !have_exact_uhd50) {
+        printf("[DRM] No native 3840x2160@50.00 found; trying forced CEA-861 timing (VIC 96)\n");
+        fflush(stdout);
+        make_cea_861_uhd50_mode(&target_mode);
+        forced_uhd50 = 1;
+    }
+
+    ctx->mode_vrefresh = target_mode.vrefresh;
+    ctx->mode_refresh_hz = (float)target_mode.clock * 1000.0f / ((float)target_mode.htotal * (float)target_mode.vtotal);
     
     /* Allocate and store mode for later use in page flips (malloc unlikely to fail here) */
     ctx->current_mode = malloc(sizeof(drmModeModeInfo));
     if (ctx->current_mode) {
-        memcpy(ctx->current_mode, mode, sizeof(drmModeModeInfo));
+        memcpy(ctx->current_mode, &target_mode, sizeof(drmModeModeInfo));
     }
     printf("[DRM] Using mode: %ux%u@%u Hz\n", target_mode.hdisplay, target_mode.vdisplay, target_mode.vrefresh);
 
@@ -246,7 +303,7 @@ int drm_init(ltc_drm_context_t *ctx, uint32_t target_vrefresh) {
     printf("[DRM] Found %d CRTCs\n", res->count_crtcs);
 
     /* Allocate framebuffers BEFORE trying to set CRTC */
-    if (allocate_dumb_buffer(ctx->fd, &ctx->front, DISPLAY_WIDTH, DISPLAY_HEIGHT)) {
+    if (allocate_dumb_buffer(ctx->fd, &ctx->front, target_mode.hdisplay, target_mode.vdisplay)) {
         fprintf(stderr, "Failed to allocate front buffer\n");
         drmModeFreeResources(res);
         drmModeFreeConnector(conn);
@@ -254,7 +311,7 @@ int drm_init(ltc_drm_context_t *ctx, uint32_t target_vrefresh) {
         return -1;
     }
 
-    if (allocate_dumb_buffer(ctx->fd, &ctx->back, DISPLAY_WIDTH, DISPLAY_HEIGHT)) {
+    if (allocate_dumb_buffer(ctx->fd, &ctx->back, target_mode.hdisplay, target_mode.vdisplay)) {
         fprintf(stderr, "Failed to allocate back buffer\n");
         drmModeFreeResources(res);
         drmModeFreeConnector(conn);
@@ -282,6 +339,35 @@ int drm_init(ltc_drm_context_t *ctx, uint32_t target_vrefresh) {
         }
     }
 
+    if (!crtc_found && forced_uhd50) {
+        printf("[DRM] Forced CEA-861 4K50 rejected by sink/driver, falling back to closest native mode\n");
+        fflush(stdout);
+
+        target_mode = *mode;
+        ctx->mode_vrefresh = target_mode.vrefresh;
+        ctx->mode_refresh_hz = (float)target_mode.clock * 1000.0f / ((float)target_mode.htotal * (float)target_mode.vtotal);
+        if (ctx->current_mode) {
+            memcpy(ctx->current_mode, &target_mode, sizeof(drmModeModeInfo));
+        }
+
+        for (int i = 0; i < res->count_crtcs && !crtc_found; i++) {
+            ctx->crtc_id = res->crtcs[i];
+            ctx->crtc_index = i;
+
+            printf("[DRM] Retry CRTC %d (ID %u) with native mode %ux%u@%u...\n",
+                   i, ctx->crtc_id, target_mode.hdisplay, target_mode.vdisplay, target_mode.vrefresh);
+
+            if (drmModeSetCrtc(ctx->fd, ctx->crtc_id, ctx->front.fb_id, 0, 0,
+                               &ctx->connector_id, 1, &target_mode) == 0) {
+                printf("[DRM] Native fallback mode accepted on CRTC %d\n", i);
+                crtc_found = 1;
+                break;
+            } else {
+                printf("[DRM] Retry CRTC %d failed: %s (errno %d)\n", i, strerror(errno), errno);
+            }
+        }
+    }
+
     if (!crtc_found) {
         fprintf(stderr, "Failed to configure any CRTC\n");
         drmModeFreeResources(res);
@@ -290,7 +376,7 @@ int drm_init(ltc_drm_context_t *ctx, uint32_t target_vrefresh) {
         return -1;
     }
 
-    printf("[DRM] Initialized %ux%u @ %u Hz\n", DISPLAY_WIDTH, DISPLAY_HEIGHT, ctx->mode_vrefresh);
+    printf("[DRM] Initialized %ux%u @ %u Hz\n", target_mode.hdisplay, target_mode.vdisplay, ctx->mode_vrefresh);
 
     drmModeFreeResources(res);
     drmModeFreeConnector(conn);

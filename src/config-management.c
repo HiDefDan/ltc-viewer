@@ -7,13 +7,48 @@
 #include <ctype.h>
 
 static void clamp_config_values(ltc_config_t *config) {
-    const int max_timecode_y = DISPLAY_HEIGHT - FONT_GLYPH_HEIGHT;
-
-    if (config->timecode_y < 0) {
-        config->timecode_y = 0;
+    if (config->display_width <= 0 || config->display_width > 7680) {
+        config->display_width = DISPLAY_WIDTH;
     }
-    if (config->timecode_y > max_timecode_y) {
-        config->timecode_y = max_timecode_y;
+    if (config->display_height <= 0 || config->display_height > 4320) {
+        config->display_height = DISPLAY_HEIGHT;
+    }
+
+    float scale_x = (float)config->display_width / (float)DISPLAY_WIDTH;
+    float scale_y = (float)config->display_height / (float)DISPLAY_HEIGHT;
+    float scale = (scale_x < scale_y) ? scale_x : scale_y;
+    if (scale <= 0.0f) {
+        scale = 1.0f;
+    }
+
+    int scaled_glyph_height = (int)(FONT_GLYPH_HEIGHT * scale + 0.5f);
+    if (scaled_glyph_height < 1) {
+        scaled_glyph_height = 1;
+    }
+    if (scaled_glyph_height > config->display_height) {
+        scaled_glyph_height = config->display_height;
+    }
+
+    /* Allow Y offset up to ±(height - glyph_height) / 2 to keep text in bounds */
+    int max_y_offset = (config->display_height - scaled_glyph_height) / 2;
+    if (max_y_offset < 0) max_y_offset = 0;
+
+    if (config->timecode_y_offset < -max_y_offset) {
+        config->timecode_y_offset = -max_y_offset;
+    }
+    if (config->timecode_y_offset > max_y_offset) {
+        config->timecode_y_offset = max_y_offset;
+    }
+
+    /* Allow X offset up to ±(width / 2) for horizontal centering flexibility */
+    int max_x_offset = config->display_width / 2;
+    if (max_x_offset < 0) max_x_offset = 0;
+
+    if (config->timecode_x_offset < -max_x_offset) {
+        config->timecode_x_offset = -max_x_offset;
+    }
+    if (config->timecode_x_offset > max_x_offset) {
+        config->timecode_x_offset = max_x_offset;
     }
 }
 
@@ -21,9 +56,11 @@ void config_default(ltc_config_t *config) {
     strcpy(config->timezone, "Europe/London");
     strcpy(config->ntp_server, "pool.ntp.org");
     strcpy(config->custom_ntp_servers, "[]");
+    config->display_width = DISPLAY_WIDTH;
+    config->display_height = DISPLAY_HEIGHT;
     config->refresh_hz = 50;
-    config->timecode_x = 333;      /* Original carefully calculated center position */
-    config->timecode_y = 412;      /* Original carefully calculated center position */
+    config->timecode_x_offset = 0; /* Centered horizontally */
+    config->timecode_y_offset = 0; /* Centered vertically */
     config->color_r = 64;
     config->color_g = 255;
     config->color_b = 64;
@@ -110,9 +147,11 @@ int config_from_json(const char *json_str, ltc_config_t *config) {
             }
         }
     }
+    json_extract_int(json_str, "display_width", &config->display_width);
+    json_extract_int(json_str, "display_height", &config->display_height);
     json_extract_float(json_str, "refresh_hz", &config->refresh_hz);
-    json_extract_int(json_str, "timecode_x", &config->timecode_x);
-    json_extract_int(json_str, "timecode_y", &config->timecode_y);
+    json_extract_int(json_str, "timecode_x_offset", &config->timecode_x_offset);
+    json_extract_int(json_str, "timecode_y_offset", &config->timecode_y_offset);
     json_extract_int(json_str, "color_r", &config->color_r);
     json_extract_int(json_str, "color_g", &config->color_g);
     json_extract_int(json_str, "color_b", &config->color_b);
@@ -134,9 +173,11 @@ char* config_to_json(const ltc_config_t *config) {
         "  \"timezone\": \"%s\",\n"
         "  \"ntp_server\": \"%s\",\n"
         "  \"custom_ntp_servers\": %s,\n"
+        "  \"display_width\": %d,\n"
+        "  \"display_height\": %d,\n"
         "  \"refresh_hz\": %.2f,\n"
-        "  \"timecode_x\": %d,\n"
-        "  \"timecode_y\": %d,\n"
+        "  \"timecode_x_offset\": %d,\n"
+        "  \"timecode_y_offset\": %d,\n"
         "  \"color_r\": %d,\n"
         "  \"color_g\": %d,\n"
         "  \"color_b\": %d,\n"
@@ -147,9 +188,11 @@ char* config_to_json(const ltc_config_t *config) {
         config->timezone,
         config->ntp_server,
         config->custom_ntp_servers,
+        config->display_width,
+        config->display_height,
         config->refresh_hz,
-        config->timecode_x,
-        config->timecode_y,
+        config->timecode_x_offset,
+        config->timecode_y_offset,
         config->color_r,
         config->color_g,
         config->color_b,
