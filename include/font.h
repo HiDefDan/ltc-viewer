@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#define FONT_GLYPH_HEIGHT 256
+
 /* 7-segment display font renderer:
    Loads 11 individual 8-bit grayscale PNG files (digits 0-9 and period).
    Optionally loads background layer from bg_time.png (unlit 7-segment grid).

@@ -1,8 +1,21 @@
 #include "config-management.h"
+#include "config.h"
+#include "font.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+
+static void clamp_config_values(ltc_config_t *config) {
+    const int max_timecode_y = DISPLAY_HEIGHT - FONT_GLYPH_HEIGHT;
+
+    if (config->timecode_y < 0) {
+        config->timecode_y = 0;
+    }
+    if (config->timecode_y > max_timecode_y) {
+        config->timecode_y = max_timecode_y;
+    }
+}
 
 void config_default(ltc_config_t *config) {
     strcpy(config->timezone, "Europe/London");
@@ -106,6 +119,8 @@ int config_from_json(const char *json_str, ltc_config_t *config) {
     json_extract_int(json_str, "bg_color_r", &config->bg_color_r);
     json_extract_int(json_str, "bg_color_g", &config->bg_color_g);
     json_extract_int(json_str, "bg_color_b", &config->bg_color_b);
+
+    clamp_config_values(config);
     
     return 0;
 }
@@ -191,6 +206,10 @@ int config_load(const char *path, ltc_config_t *config) {
     
     json[read] = '\0';
     int ret = config_from_json(json, config);
+
+    if (ret == 0) {
+        clamp_config_values(config);
+    }
     
     free(json);
     

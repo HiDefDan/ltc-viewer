@@ -1,10 +1,19 @@
 console.log('app.js loaded - hello world from app.js');
 
+const DISPLAY_HEIGHT = 1080;
+const TIME_STRING_HEIGHT = 256;
+const MAX_TIMECODE_Y = DISPLAY_HEIGHT - TIME_STRING_HEIGHT;
+
 class ConfigManager {
     constructor() {
         this.config = {};
         this.tzdata = {};
         this.init();
+    }
+
+    clampTimecodeY(value) {
+        if (Number.isNaN(value)) return 0;
+        return Math.min(MAX_TIMECODE_Y, Math.max(0, value));
     }
 
     async init() {
@@ -356,7 +365,9 @@ class ConfigManager {
             select.value = bestMatch;
         }
         
-        document.getElementById('timecodeY').value = this.config.timecode_y || 412;
+        const yInput = document.getElementById('timecodeY');
+        yInput.max = String(MAX_TIMECODE_Y);
+        yInput.value = this.clampTimecodeY(this.config.timecode_y || 412);
 
         document.getElementById('colorR').value = this.config.color_r || 64;
         document.getElementById('colorRValue').value = this.config.color_r || 64;
@@ -442,11 +453,15 @@ class ConfigManager {
     async handleSubmit(e) {
         e.preventDefault();
 
+        const yInput = document.getElementById('timecodeY');
+        const clampedY = this.clampTimecodeY(parseInt(yInput.value));
+        yInput.value = clampedY;
+
         const config = {
             timezone: document.getElementById('timezone').value,
             ntp_server: document.getElementById('ntpServer').value,
             refresh_hz: parseFloat(document.getElementById('refreshHz').value),
-            timecode_y: parseInt(document.getElementById('timecodeY').value),
+            timecode_y: clampedY,
             color_r: parseInt(document.getElementById('colorR').value),
             color_g: parseInt(document.getElementById('colorG').value),
             color_b: parseInt(document.getElementById('colorB').value),
