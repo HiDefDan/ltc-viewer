@@ -1,0 +1,3 @@
+# Allow ltc-config user to manage system settings
+ltc-config ALL=(ALL) NOPASSWD: /usr/bin/timedatectl
+ltc-config ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart ltc-timecode

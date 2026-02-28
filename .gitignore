@@ -1,7 +1,9 @@
 # Build artifacts
 *.o
 ltc-timecode
+ltc-config-daemon
 build/
+*.log
 
 # IDE/editor files
 .vscode/
