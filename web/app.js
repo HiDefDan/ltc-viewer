@@ -6,7 +6,25 @@ class ConfigManager {
     constructor() {
         this.config = {};
         this.tzdata = {};
+        this.networkStatusWs = null;
+        this.wsReconnectDelay = 1500;
+        this.configRevision = 0;
+        this.isRemoteConfigSyncing = false;
         this.init();
+    }
+
+    setSaveLock(locked, buttonText = null) {
+        const saveBtn = document.getElementById('saveBtn');
+        if (!saveBtn) {
+            return;
+        }
+
+        if (!saveBtn.dataset.defaultText) {
+            saveBtn.dataset.defaultText = saveBtn.textContent;
+        }
+
+        saveBtn.disabled = locked;
+        saveBtn.textContent = buttonText || saveBtn.dataset.defaultText;
     }
 
     getGlyphScale(width, height) {
@@ -113,6 +131,11 @@ class ConfigManager {
             }
         });
 
+        // VLAN enable checkbox
+        document.getElementById('adminVlanEnabled').addEventListener('change', () => {
+            this.toggleVlanFields();
+        });
+
     }
 
     async loadTimezoneData() {
@@ -129,9 +152,18 @@ class ConfigManager {
         try {
             const response = await fetch('/api/config');
             this.config = await response.json();
+            this.configRevision = this.config.config_revision || this.configRevision;
             this.populateForm();
+            if (this.isRemoteConfigSyncing) {
+                this.isRemoteConfigSyncing = false;
+                this.setSaveLock(false);
+            }
         } catch (e) {
             console.error('Failed to load config:', e);
+            if (this.isRemoteConfigSyncing) {
+                this.isRemoteConfigSyncing = false;
+                this.setSaveLock(false);
+            }
             this.showStatus('Failed to load configuration', 'error');
         }
     }
@@ -439,7 +471,12 @@ class ConfigManager {
             color_r: parseInt(document.getElementById('colorR').value),
             color_g: parseInt(document.getElementById('colorG').value),
             color_b: parseInt(document.getElementById('colorB').value),
-            custom_ntp_servers: this.config.custom_ntp_servers || '[]'
+            custom_ntp_servers: this.config.custom_ntp_servers || '[]',
+            admin_vlan_enabled: document.getElementById('adminVlanEnabled').checked ? 1 : 0,
+            admin_vlan_ip: document.getElementById('adminVlanIp').value || '192.168.1.100/24',
+            admin_vlan_gateway: document.getElementById('adminVlanGateway').value || '',
+            web_ui_bind_address: document.getElementById('webUiBindAddress').value || '0.0.0.0',
+            web_ui_bind_port: parseInt(document.getElementById('webUiBindPort').value) || 8080
         };
 
         try {
@@ -495,6 +532,15 @@ class ConfigManager {
 
         this.updateColorPreview('colorPreview');
         this.setRegionFromTimezone(this.config.timezone);
+        
+        // Network settings
+        document.getElementById('adminVlanEnabled').checked = this.config.admin_vlan_enabled || false;
+        document.getElementById('adminVlanIp').value = this.config.admin_vlan_ip || '192.168.1.100/24';
+        document.getElementById('adminVlanGateway').value = this.config.admin_vlan_gateway || '';
+        document.getElementById('webUiBindAddress').value = this.config.web_ui_bind_address || '0.0.0.0';
+        document.getElementById('webUiBindPort').value = this.config.web_ui_bind_port || 8080;
+        this.toggleVlanFields();
+        this.startNetworkStatusRefresh();
     }
 
     setRegionFromTimezone(tz) {
@@ -518,6 +564,157 @@ class ConfigManager {
         }
         
         console.warn('Timezone not found in tzdata:', tz, 'Available regions:', Object.keys(this.tzdata.regions));
+    }
+
+    toggleVlanFields() {
+        const enabled = document.getElementById('adminVlanEnabled').checked;
+        const vlanConfigGroup = document.getElementById('vlanConfigGroup');
+        const vlanGatewayGroup = document.getElementById('vlanGatewayGroup');
+        
+        vlanConfigGroup.style.display = enabled ? 'block' : 'none';
+        vlanGatewayGroup.style.display = enabled ? 'block' : 'none';
+        
+        // Update requiredness
+        document.getElementById('adminVlanIp').required = enabled;
+    }
+
+    startNetworkStatusRefresh() {
+        this.ensureNetworkStatusTable();
+        if (!this.networkStatusWs) {
+            this.connectNetworkStatusWs();
+        }
+    }
+
+    ensureNetworkStatusTable() {
+        const content = document.getElementById('networkStatusContent');
+        if (content.querySelector('.interfaces-table')) {
+            return;
+        }
+
+        let html = '<table class="interfaces-table">';
+        html += '<thead><tr>';
+        html += '<th>Interface</th>';
+        html += '<th class="bandwidth-col">Tx</th>';
+        html += '<th class="bandwidth-col">Rx</th>';
+        html += '</tr></thead><tbody>';
+        html += '</tbody></table>';
+        content.innerHTML = html;
+    }
+
+    connectNetworkStatusWs() {
+        try {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const currentPort = parseInt(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
+            const wsPort = currentPort + 1;
+            const wsUrl = `${protocol}//${window.location.hostname}:${wsPort}`;
+            
+            this.networkStatusWs = new WebSocket(wsUrl);
+            this.networkStatusWs.onopen = () => {
+                console.log('Network status WebSocket connected');
+            };
+            this.networkStatusWs.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'config_update') {
+                        const incomingRevision = data.config_revision || 0;
+                        if (incomingRevision > this.configRevision) {
+                            this.isRemoteConfigSyncing = true;
+                            this.setSaveLock(true, 'Syncing...');
+                            this.showStatusWithAutoHide('Configuration updated in another browser, refreshing...', 'warning', 3500);
+                            this.loadConfig();
+                        }
+                        return;
+                    }
+                    if (data.interfaces) {
+                        this.updateNetworkStatusTableWithRates(data);
+                    }
+                } catch (e) {
+                    console.error('Failed to parse network status message:', e);
+                }
+            };
+            this.networkStatusWs.onerror = (error) => {
+                console.error('Network status WebSocket error:', error);
+                this.networkStatusWs = null;
+            };
+            this.networkStatusWs.onclose = () => {
+                console.log('Network status WebSocket closed');
+                this.networkStatusWs = null;
+                setTimeout(() => this.connectNetworkStatusWs(), this.wsReconnectDelay);
+            };
+        } catch (e) {
+            console.error('WebSocket connection failed:', e);
+            this.networkStatusWs = null;
+            setTimeout(() => this.connectNetworkStatusWs(), this.wsReconnectDelay);
+        }
+    }
+
+    stopNetworkStatusRefresh() {
+        if (this.networkStatusWs) {
+            this.networkStatusWs.close();
+            this.networkStatusWs = null;
+        }
+    }
+
+    updateNetworkStatusTableWithRates(data) {
+        if (!data.interfaces || data.interfaces.length === 0) {
+            document.getElementById('networkStatusContent').innerHTML = '<p>No network interfaces found</p>';
+            return;
+        }
+        
+        const content = document.getElementById('networkStatusContent');
+        
+        // If table doesn't exist, create initial table with bandwidth columns
+        if (!content.querySelector('.interfaces-table')) {
+            this.ensureNetworkStatusTable();
+        }
+        
+        // Update or create table rows
+        const table = content.querySelector('.interfaces-table tbody');
+        if (!table) return;
+        
+        data.interfaces.forEach(iface => {
+            let row = table.querySelector(`tr[data-interface="${iface.name}"]`);
+            
+            if (!row) {
+                // Create new row for new interface
+                row = document.createElement('tr');
+                row.className = 'interface-row';
+                row.setAttribute('data-interface', iface.name);
+                row.setAttribute('data-type', iface.type || 'ethernet');
+                
+                const typeIcon = this.getInterfaceIcon(iface.type || 'ethernet');
+                row.innerHTML = `
+                    <td class="interface-name">${typeIcon} ${iface.name}</td>
+                    <td class="bandwidth-tx">${this.formatBandwidth(iface.tx_rate_kbps || 0)}</td>
+                    <td class="bandwidth-rx">${this.formatBandwidth(iface.rx_rate_kbps || 0)}</td>
+                `;
+                table.appendChild(row);
+            } else {
+                // Update existing row
+                const cells = row.querySelectorAll('td');
+                if (cells.length >= 3) {
+                    cells[1].textContent = this.formatBandwidth(iface.tx_rate_kbps || 0);
+                    cells[2].textContent = this.formatBandwidth(iface.rx_rate_kbps || 0);
+                }
+            }
+        });
+    }
+
+    getInterfaceIcon(type) {
+        switch(type) {
+            case 'ethernet': return '🔌';
+            case 'wifi': return '📶';
+            case 'vlan': return '🏷️';
+            default: return '🔗';
+        }
+    }
+
+    formatBandwidth(kbps) {
+        if (!kbps || kbps === 0) return '0 kbps';
+        if (kbps >= 1000) {
+            return (kbps / 1000).toFixed(2) + ' Mbps';
+        }
+        return kbps.toFixed(1) + ' kbps';
     }
 
     populateRegions() {
@@ -563,6 +760,13 @@ class ConfigManager {
     async handleSubmit(e) {
         e.preventDefault();
 
+        if (this.isRemoteConfigSyncing) {
+            this.showStatusWithAutoHide('Sync in progress, please wait...', 'warning', 2000);
+            return;
+        }
+
+        this.setSaveLock(true, 'Saving...');
+
         const selectedResolution = this.parseResolutionValue(document.getElementById('displayResolution').value);
         const yInput = document.getElementById('timecodeYOffset');
         const xInput = document.getElementById('timecodeXOffset');
@@ -572,6 +776,7 @@ class ConfigManager {
         xInput.value = clampedX;
 
         const config = {
+            config_revision: this.configRevision,
             timezone: document.getElementById('timezone').value,
             ntp_server: document.getElementById('ntpServer').value,
             display_width: selectedResolution.width,
@@ -582,7 +787,12 @@ class ConfigManager {
             color_r: parseInt(document.getElementById('colorR').value),
             color_g: parseInt(document.getElementById('colorG').value),
             color_b: parseInt(document.getElementById('colorB').value),
-            custom_ntp_servers: this.config.custom_ntp_servers || '[]'
+            custom_ntp_servers: this.config.custom_ntp_servers || '[]',
+            admin_vlan_enabled: document.getElementById('adminVlanEnabled').checked ? 1 : 0,
+            admin_vlan_ip: document.getElementById('adminVlanIp').value || '192.168.1.100/24',
+            admin_vlan_gateway: document.getElementById('adminVlanGateway').value || '',
+            web_ui_bind_address: document.getElementById('webUiBindAddress').value || '0.0.0.0',
+            web_ui_bind_port: parseInt(document.getElementById('webUiBindPort').value) || 8080
         };
 
         this.showStatus('Saving configuration...', 'loading');
@@ -596,14 +806,46 @@ class ConfigManager {
                 body: JSON.stringify(config)
             });
 
+            const responseData = await response.json().catch(() => ({}));
+
             if (response.ok) {
-                this.showStatusWithAutoHide('Configuration saved successfully!', 'success');
+                if (responseData.config_revision) {
+                    this.configRevision = responseData.config_revision;
+                }
+                // Apply network VLAN configuration
+                try {
+                    const vlanResponse = await fetch('/api/network/vlan', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(config)
+                    });
+                    
+                    if (vlanResponse.ok) {
+                        this.showStatusWithAutoHide('Configuration saved and network applied successfully!', 'success');
+                    } else {
+                        this.showStatusWithAutoHide('Configuration saved but network changes failed', 'warning');
+                    }
+                } catch (netErr) {
+                    console.error('Error applying network config:', netErr);
+                    this.showStatusWithAutoHide('Configuration saved but network changes failed', 'warning');
+                }
+            } else if (response.status === 409) {
+                this.showStatusWithAutoHide('Configuration changed in another browser. Reloading latest values...', 'warning', 4000);
+                this.isRemoteConfigSyncing = true;
+                this.setSaveLock(true, 'Syncing...');
+                await this.loadConfig();
             } else {
                 this.showStatusWithAutoHide('Failed to save configuration', 'error');
             }
         } catch (e) {
             console.error('Error saving config:', e);
             this.showStatusWithAutoHide('Error saving configuration: ' + e.message, 'error');
+        } finally {
+            if (!this.isRemoteConfigSyncing) {
+                this.setSaveLock(false);
+            }
         }
     }
 
@@ -625,6 +867,13 @@ class ConfigManager {
             document.getElementById('colorGValue').value = 255;
             document.getElementById('colorB').value = 64;
             document.getElementById('colorBValue').value = 64;
+
+            document.getElementById('adminVlanEnabled').checked = false;
+            document.getElementById('adminVlanIp').value = '192.168.1.100/24';
+            document.getElementById('adminVlanGateway').value = '';
+            document.getElementById('webUiBindAddress').value = '0.0.0.0';
+            document.getElementById('webUiBindPort').value = '8080';
+            this.toggleVlanFields();
 
             this.updateColorPreview('colorPreview');
             this.setRegionFromTimezone('Europe/London');

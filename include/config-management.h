@@ -18,6 +18,13 @@ typedef struct {
     int bg_color_r;               // Background red
     int bg_color_g;               // Background green
     int bg_color_b;               // Background blue
+    
+    // Network settings
+    int admin_vlan_enabled;       // Enable VLAN 1 for admin access
+    char admin_vlan_ip[64];       // Static IP with CIDR (e.g., "192.168.1.100/24")
+    char admin_vlan_gateway[64];  // Gateway IP (optional)
+    char web_ui_bind_address[64]; // Bind address: "0.0.0.0" for all, or specific IP
+    int web_ui_bind_port;         // Web UI port (default 8080)
 } ltc_config_t;
 
 /**

@@ -209,6 +209,12 @@ input[type="range"]::-moz-range-thumb {
     transform: translateY(0);
 }
 
+.btn:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
+    transform: none;
+}
+
 .btn-secondary {
     background: #333;
     color: #e0e0e0;
@@ -483,3 +489,87 @@ input[type="range"]::-moz-range-thumb {
 .custom-server-item .delete-btn:hover {
     background: #cc2e38;
 }
+
+/* Network Interface Table */
+.network-status-panel {
+    margin-top: 20px;
+    padding: 16px;
+    background: #0d0d0d;
+    border: 1px solid #333;
+    border-radius: 6px;
+}
+
+.network-status-panel h3 {
+    color: #40ff40;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+    font-weight: 600;
+}
+
+.interfaces-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.interfaces-table thead {
+    background: #1a1a1a;
+    border-bottom: 2px solid #333;
+}
+
+.interfaces-table th {
+    padding: 10px 12px;
+    text-align: left;
+    color: #888;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+}
+
+.interfaces-table th.bandwidth-col {
+    text-align: right;
+}
+
+.interfaces-table tbody tr {
+    border-bottom: 1px solid #222;
+    transition: background-color 0.15s;
+}
+
+.interface-row {
+    cursor: pointer;
+}
+
+.interface-row:hover {
+    background: #1a1a1a;
+}
+
+.interfaces-table td {
+    padding: 12px;
+    color: #e0e0e0;
+}
+
+.interface-name {
+    font-weight: 500;
+    color: #40ff40;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.network-status-content p.error {
+    color: #dc3545;
+    font-size: 13px;
+}
+
+.bandwidth-tx,
+.bandwidth-rx {
+    font-weight: 500;
+    color: #40ff40;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    min-width: 120px;
+}
+

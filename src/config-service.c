@@ -3,14 +3,16 @@
 #include "config-management.h"
 #include "config.h"
 #include <microhttpd.h>
+#include <libwebsockets.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <math.h>
+#include <time.h>
+#include <ctype.h>
 
 /* DRM includes for display mode detection */
 typedef unsigned int drm_handle_t;
@@ -41,6 +43,8 @@ static int handle_get_tzdata(struct MHD_Connection *conn);
 static int handle_get_ntp_status(struct MHD_Connection *conn);
 static int handle_get_ntp_servers(struct MHD_Connection *conn);
 static int handle_get_display_modes(struct MHD_Connection *conn);
+static int handle_post_network_vlan(struct MHD_Connection *conn, const char *upload_data,
+                                     size_t *upload_data_size, void **con_cls);
 
 /* Stratum 0 NTP servers for precise atomic clock synchronization */
 static const char *stratum0_servers[] = {
@@ -52,6 +56,33 @@ static const char *stratum0_servers[] = {
     "pool.ntp.org",
     NULL
 };
+
+/* Interface statistics tracking for bandwidth rate calculation */
+typedef struct {
+    char name[64];
+    unsigned long long tx_bytes_last;
+    unsigned long long rx_bytes_last;
+    time_t last_update_time;
+    double tx_rate_kbps;
+    double rx_rate_kbps;
+} interface_stats_t;
+
+typedef struct {
+    struct lws *wsi;
+} ws_client_t;
+
+#define MAX_INTERFACES 16
+#define MAX_WS_CLIENTS 16
+
+static interface_stats_t interface_stats[MAX_INTERFACES];
+static int interface_stats_count = 0;
+static pthread_mutex_t interface_stats_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static ws_client_t ws_clients[MAX_WS_CLIENTS];
+static pthread_mutex_t ws_clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static struct lws_context *ws_context = NULL;
+static unsigned long long config_revision = 1;
 
 struct connection_info {
     char *post_data;
@@ -78,12 +109,274 @@ static int send_response(struct MHD_Connection *conn, const char *data, size_t s
     return ret;
 }
 
+static void copy_line_value(char *dst, size_t dst_size, const char *src) {
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+
+    size_t value_len = strcspn(src, "\n");
+    if (value_len >= dst_size) {
+        value_len = dst_size - 1;
+    }
+    memcpy(dst, src, value_len);
+    dst[value_len] = '\0';
+}
+
+static void broadcast_ws_message(const char *json_data) {
+    if (!ws_context || !json_data) {
+        return;
+    }
+
+    pthread_mutex_lock(&ws_clients_mutex);
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (ws_clients[i].wsi) {
+            size_t len = strlen(json_data);
+            unsigned char buf[LWS_PRE + len];
+            memcpy(&buf[LWS_PRE], json_data, len);
+            lws_write(ws_clients[i].wsi, &buf[LWS_PRE], len, LWS_WRITE_TEXT);
+        }
+    }
+    pthread_mutex_unlock(&ws_clients_mutex);
+}
+
+static void broadcast_config_update(unsigned long long revision) {
+    char json_data[128];
+    snprintf(json_data, sizeof(json_data),
+             "{\"type\":\"config_update\",\"config_revision\":%llu}",
+             revision);
+    broadcast_ws_message(json_data);
+}
+
+static int extract_config_revision(const char *json, unsigned long long *revision_out) {
+    if (!json || !revision_out) {
+        return 0;
+    }
+
+    const char *key = strstr(json, "\"config_revision\"");
+    if (!key) {
+        return 0;
+    }
+
+    const char *colon = strchr(key, ':');
+    if (!colon) {
+        return 0;
+    }
+
+    char *endptr = NULL;
+    unsigned long long revision = strtoull(colon + 1, &endptr, 10);
+    if (endptr == colon + 1) {
+        return 0;
+    }
+
+    *revision_out = revision;
+    return 1;
+}
+
+static char *config_to_json_with_revision(const ltc_config_t *config, unsigned long long revision) {
+    char *base_json = config_to_json((ltc_config_t *)config);
+    if (!base_json) {
+        return NULL;
+    }
+
+    size_t base_len = strlen(base_json);
+    while (base_len > 0 && isspace((unsigned char)base_json[base_len - 1])) {
+        base_len--;
+    }
+
+    if (base_len < 2 || base_json[base_len - 1] != '}') {
+        return base_json;
+    }
+
+    size_t output_size = base_len + 64;
+    char *output = malloc(output_size);
+    if (!output) {
+        return base_json;
+    }
+
+    int written = snprintf(output, output_size,
+                           "%.*s,\"config_revision\":%llu}",
+                           (int)(base_len - 1), base_json, revision);
+    free(base_json);
+
+    if (written < 0 || (size_t)written >= output_size) {
+        free(output);
+        return NULL;
+    }
+
+    return output;
+}
+
+/* WebSocket callback and helpers */
+static int update_interface_stats(void) {
+    pthread_mutex_lock(&interface_stats_mutex);
+    
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "ip link show | grep -E '^[0-9]+:' | awk '{print $2}' | sed 's/:$//'");
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        pthread_mutex_unlock(&interface_stats_mutex);
+        return -1;
+    }
+    
+    char ifname[64];
+    time_t now = time(NULL);
+    
+    while (fgets(ifname, sizeof(ifname), fp)) {
+        /* Remove newline */
+        size_t len = strlen(ifname);
+        if (len > 0 && ifname[len-1] == '\n') {
+            ifname[len-1] = '\0';
+        }
+        
+        /* Skip loopback and docker interfaces */
+        if (strcmp(ifname, "lo") == 0 || strstr(ifname, "docker") != NULL) {
+            continue;
+        }
+        
+        /* Get current stats */
+        char tx_path[128], rx_path[128];
+        snprintf(tx_path, sizeof(tx_path), "/sys/class/net/%s/statistics/tx_bytes", ifname);
+        snprintf(rx_path, sizeof(rx_path), "/sys/class/net/%s/statistics/rx_bytes", ifname);
+        
+        unsigned long long tx_bytes = 0, rx_bytes = 0;
+        FILE *tx_fp = fopen(tx_path, "r");
+        if (tx_fp) {
+            fscanf(tx_fp, "%llu", &tx_bytes);
+            fclose(tx_fp);
+        }
+        FILE *rx_fp = fopen(rx_path, "r");
+        if (rx_fp) {
+            fscanf(rx_fp, "%llu", &rx_bytes);
+            fclose(rx_fp);
+        }
+        
+        /* Find or create stats entry */
+        int idx = -1;
+        for (int i = 0; i < interface_stats_count; i++) {
+            if (strcmp(interface_stats[i].name, ifname) == 0) {
+                idx = i;
+                break;
+            }
+        }
+        
+        if (idx >= 0) {
+            /* Calculate rate (bytes per second, convert to kbps) */
+            time_t elapsed = now - interface_stats[idx].last_update_time;
+            if (elapsed > 0) {
+                unsigned long long tx_delta = tx_bytes - interface_stats[idx].tx_bytes_last;
+                unsigned long long rx_delta = rx_bytes - interface_stats[idx].rx_bytes_last;
+                interface_stats[idx].tx_rate_kbps = (tx_delta * 8.0) / (elapsed * 1000.0);
+                interface_stats[idx].rx_rate_kbps = (rx_delta * 8.0) / (elapsed * 1000.0);
+            }
+            interface_stats[idx].tx_bytes_last = tx_bytes;
+            interface_stats[idx].rx_bytes_last = rx_bytes;
+            interface_stats[idx].last_update_time = now;
+        } else if (interface_stats_count < MAX_INTERFACES) {
+            /* New interface */
+            idx = interface_stats_count++;
+            strcpy(interface_stats[idx].name, ifname);
+            interface_stats[idx].tx_bytes_last = tx_bytes;
+            interface_stats[idx].rx_bytes_last = rx_bytes;
+            interface_stats[idx].last_update_time = now;
+            interface_stats[idx].tx_rate_kbps = 0;
+            interface_stats[idx].rx_rate_kbps = 0;
+        }
+    }
+    pclose(fp);
+    
+    pthread_mutex_unlock(&interface_stats_mutex);
+    return 0;
+}
+
+static void broadcast_network_stats(void) {
+    if (!ws_context) return;
+    
+    update_interface_stats();
+    
+    pthread_mutex_lock(&interface_stats_mutex);
+    
+    /* Build JSON with current rates */
+    char json_data[4096];
+    char *pos = json_data;
+    int remaining = sizeof(json_data);
+    int written = snprintf(pos, remaining, "{\"interfaces\":[");
+    pos += written;
+    remaining -= written;
+    
+    int first = 1;
+    for (int i = 0; i < interface_stats_count; i++) {
+        if (!first) {
+            written = snprintf(pos, remaining, ",");
+            pos += written;
+            remaining -= written;
+        }
+        
+        written = snprintf(pos, remaining,
+                   "{\"name\":\"%s\",\"tx_rate_kbps\":%.2f,\"rx_rate_kbps\":%.2f}",
+                   interface_stats[i].name,
+                   interface_stats[i].tx_rate_kbps,
+                   interface_stats[i].rx_rate_kbps);
+        pos += written;
+        remaining -= written;
+        
+        first = 0;
+    }
+    
+    written = snprintf(pos, remaining, "]}");
+    
+    pthread_mutex_unlock(&interface_stats_mutex);
+    
+    broadcast_ws_message(json_data);
+}
+
+static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
+                       void *user, void *in, size_t len) {
+    (void)user;
+    (void)in;
+    (void)len;
+
+    switch (reason) {
+        case LWS_CALLBACK_ESTABLISHED:
+            pthread_mutex_lock(&ws_clients_mutex);
+            for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+                if (!ws_clients[i].wsi) {
+                    ws_clients[i].wsi = wsi;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&ws_clients_mutex);
+            break;
+        case LWS_CALLBACK_CLOSED:
+            pthread_mutex_lock(&ws_clients_mutex);
+            for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+                if (ws_clients[i].wsi == wsi) {
+                    ws_clients[i].wsi = NULL;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&ws_clients_mutex);
+            break;
+        default:
+            break;
+    }
+    return 0;
+}
+
 static int handle_get_config(struct MHD_Connection *conn) {
     pthread_mutex_lock(&config_mutex);
     
     ltc_config_t config;
     config_load(config_file_path, &config);
-    char *json = config_to_json(&config);
+    char *json = config_to_json_with_revision(&config, config_revision);
+    if (!json) {
+        pthread_mutex_unlock(&config_mutex);
+        return send_response(conn, "{\"error\": \"Memory error\"}", 25,
+                           MHD_HTTP_INTERNAL_SERVER_ERROR, "application/json");
+    }
     
     int ret = send_response(conn, json, strlen(json), MHD_HTTP_OK, "application/json");
     
@@ -144,6 +437,7 @@ static int handle_post_config(struct MHD_Connection *conn, const char *upload_da
     
     // Final call: process the complete POST data
     if (*upload_data_size == 0 && info->post_data_size > 0) {
+        unsigned long long new_revision = 0;
         pthread_mutex_lock(&config_mutex);
         
         // Null-terminate the JSON
@@ -166,6 +460,19 @@ static int handle_post_config(struct MHD_Connection *conn, const char *upload_da
         // Load current config, update from JSON, and save
         ltc_config_t config;
         config_load(config_file_path, &config);
+
+        unsigned long long client_revision = 0;
+        if (extract_config_revision(info->post_data, &client_revision) &&
+            client_revision != config_revision) {
+            char response[128];
+            snprintf(response, sizeof(response),
+                     "{\"error\":\"Config changed\",\"config_revision\":%llu}",
+                     config_revision);
+            pthread_mutex_unlock(&config_mutex);
+            free_connection_info(info);
+            *con_cls = NULL;
+            return send_response(conn, response, strlen(response), MHD_HTTP_CONFLICT, "application/json");
+        }
         
         // Store old values to detect changes
         char old_timezone[256];
@@ -208,12 +515,21 @@ static int handle_post_config(struct MHD_Connection *conn, const char *upload_da
             }
         }
 
+        if (save_result == 0) {
+            config_revision++;
+            new_revision = config_revision;
+        }
+
         pthread_mutex_unlock(&config_mutex);
         free_connection_info(info);
         *con_cls = NULL;
         
         if (save_result == 0) {
-            return send_response(conn, "{\"status\": \"saved\"}", 19, MHD_HTTP_OK, "application/json");
+            broadcast_config_update(new_revision);
+            char response[128];
+            snprintf(response, sizeof(response),
+                     "{\"status\":\"saved\",\"config_revision\":%llu}", new_revision);
+            return send_response(conn, response, strlen(response), MHD_HTTP_OK, "application/json");
         } else {
             return send_response(conn, "{\"error\": \"Failed to save config\"}", 35,
                                MHD_HTTP_INTERNAL_SERVER_ERROR, "application/json");
@@ -319,22 +635,18 @@ static int handle_get_ntp_status(struct MHD_Connection *conn) {
     
     while (fgets(line, sizeof(line), fp)) {
         if (strncmp(line, "ServerName=", 11) == 0) {
-            strncpy(server_name, line + 11, sizeof(server_name) - 1);
-            server_name[strcspn(server_name, "\n")] = 0;
+            copy_line_value(server_name, sizeof(server_name), line + 11);
         }
         else if (strncmp(line, "ServerAddress=", 14) == 0) {
-            strncpy(server_address, line + 14, sizeof(server_address) - 1);
-            server_address[strcspn(server_address, "\n")] = 0;
+            copy_line_value(server_address, sizeof(server_address), line + 14);
         }
         else if (strncmp(line, "Synchronized=", 13) == 0) {
-            strncpy(synchronized, line + 13, sizeof(synchronized) - 1);
-            synchronized[strcspn(synchronized, "\n")] = 0;
+            copy_line_value(synchronized, sizeof(synchronized), line + 13);
         }
         else if (strncmp(line, "Offset=", 7) == 0) {
             /* Extract offset value */
             char *val_start = line + 7;
-            strncpy(offset, val_start, sizeof(offset) - 1);
-            offset[strcspn(offset, "\n")] = 0;
+            copy_line_value(offset, sizeof(offset), val_start);
         }
     }
     pclose(fp);
@@ -657,6 +969,174 @@ static int handle_get_display_modes(struct MHD_Connection *conn) {
     return send_response(conn, response, strlen(response), MHD_HTTP_OK, "application/json");
 }
 
+static int handle_post_network_vlan(struct MHD_Connection *conn, const char *upload_data,
+                                    size_t *upload_data_size, void **con_cls) {
+    struct connection_info *con_info = *con_cls;
+    
+    if (con_info == NULL) {
+        con_info = calloc(1, sizeof(struct connection_info));
+        if (!con_info) {
+            return MHD_NO;
+        }
+        con_info->post_data = NULL;
+        con_info->post_data_size = 0;
+        con_info->post_data_capacity = 0;
+        *con_cls = con_info;
+        return MHD_YES;
+    }
+    
+    if (*upload_data_size > 0) {
+        if (con_info->post_data_size + *upload_data_size + 1 > con_info->post_data_capacity) {
+            size_t new_capacity = con_info->post_data_capacity + *upload_data_size + 1024;
+            char *new_data = realloc(con_info->post_data, new_capacity);
+            if (!new_data) {
+                return MHD_NO;
+            }
+            con_info->post_data = new_data;
+            con_info->post_data_capacity = new_capacity;
+        }
+        
+        memcpy(con_info->post_data + con_info->post_data_size, upload_data, *upload_data_size);
+        con_info->post_data_size += *upload_data_size;
+        con_info->post_data[con_info->post_data_size] = '\0';
+        *upload_data_size = 0;
+        return MHD_YES;
+    }
+    
+    if (!con_info->post_data) {
+        return send_response(conn, "{\"error\":\"No data received\"}", 29,
+                           MHD_HTTP_BAD_REQUEST, "application/json");
+    }
+    
+    /* Check if this is an action-based request (e.g., disable interface) */
+    if (strstr(con_info->post_data, "\"action\"") != NULL) {
+        /* Simple action parser */
+        char action[32] = {0};
+        char interface[64] = {0};
+        
+        const char *action_pos = strstr(con_info->post_data, "\"action\"");
+        if (action_pos) {
+            const char *val_start = strchr(action_pos + 8, '\"');
+            if (val_start) {
+                val_start++;
+                const char *val_end = strchr(val_start, '\"');
+                if (val_end) {
+                    size_t value_len = (size_t)(val_end - val_start);
+                    if (value_len < sizeof(action)) {
+                        memcpy(action, val_start, value_len);
+                        action[value_len] = '\0';
+                    }
+                }
+            }
+        }
+        
+        const char *iface_pos = strstr(con_info->post_data, "\"interface\"");
+        if (iface_pos) {
+            const char *val_start = strchr(iface_pos + 11, '\"');
+            if (val_start) {
+                val_start++;
+                const char *val_end = strchr(val_start, '\"');
+                if (val_end) {
+                    size_t value_len = (size_t)(val_end - val_start);
+                    if (value_len < sizeof(interface)) {
+                        memcpy(interface, val_start, value_len);
+                        interface[value_len] = '\0';
+                    }
+                }
+            }
+        }
+        
+        if (strcmp(action, "disable") == 0 && strlen(interface) > 0) {
+            /* Disable interface by bringing down and optionally deleting connection */
+            char cmd[256];
+            snprintf(cmd, sizeof(cmd), "sudo nmcli device disconnect %s 2>&1", interface);
+            system(cmd);
+            
+            /* For WiFi, also disable autoconnect */
+            if (strncmp(interface, "wlan", 4) == 0 || strncmp(interface, "wlp", 3) == 0) {
+                char conn_cmd[512];
+                snprintf(conn_cmd, sizeof(conn_cmd), 
+                        "sudo nmcli -t -f NAME connection show | xargs -I {} sudo nmcli connection modify {} connection.autoconnect no 2>&1");
+                system(conn_cmd);
+            }
+            
+            return send_response(conn, "{\"status\":\"success\"}", 21, MHD_HTTP_OK, "application/json");
+        }
+        
+        return send_response(conn, "{\"error\":\"Invalid action\"}", 27,
+                           MHD_HTTP_BAD_REQUEST, "application/json");
+    }
+    
+    /* Apply VLAN configuration using nmcli */
+    ltc_config_t config;
+    if (config_from_json(con_info->post_data, &config) != 0) {
+        return send_response(conn, "{\"error\":\"Invalid JSON\"}", 25,
+                           MHD_HTTP_BAD_REQUEST, "application/json");
+    }
+    
+    /* Apply VLAN 1 configuration if enabled */
+    if (config.admin_vlan_enabled) {
+        char cmd[1024];
+        
+        /* Check if VLAN connection already exists */
+        int exists = system("nmcli connection show eth0.1 >/dev/null 2>&1") == 0;
+        
+        if (exists) {
+            /* Modify existing VLAN */
+            snprintf(cmd, sizeof(cmd),
+                    "sudo nmcli connection modify eth0.1 ipv4.addresses '%s' ipv4.method manual",
+                    config.admin_vlan_ip);
+            
+            if (strlen(config.admin_vlan_gateway) > 0) {
+                char gw_cmd[256];
+                snprintf(gw_cmd, sizeof(gw_cmd), " ipv4.gateway '%s'", config.admin_vlan_gateway);
+                strncat(cmd, gw_cmd, sizeof(cmd) - strlen(cmd) - 1);
+            }
+            
+            if (system(cmd) != 0) {
+                return send_response(conn, "{\"error\":\"Failed to modify VLAN\"}", 32,
+                                   MHD_HTTP_INTERNAL_SERVER_ERROR, "application/json");
+            }
+            
+            /* Bring connection up */
+            system("sudo nmcli connection up eth0.1 2>&1");
+        } else {
+            /* Create new VLAN connection */
+            snprintf(cmd, sizeof(cmd),
+                    "sudo nmcli connection add type vlan con-name eth0.1 ifname eth0.1 dev eth0 id 1 "
+                    "ipv4.addresses '%s' ipv4.method manual",
+                    config.admin_vlan_ip);
+            
+            if (strlen(config.admin_vlan_gateway) > 0) {
+                char gw_cmd[256];
+                snprintf(gw_cmd, sizeof(gw_cmd), " ipv4.gateway '%s'", config.admin_vlan_gateway);
+                strncat(cmd, gw_cmd, sizeof(cmd) - strlen(cmd) - 1);
+            }
+            
+            if (system(cmd) != 0) {
+                return send_response(conn, "{\"error\":\"Failed to create VLAN\"}", 32,
+                                   MHD_HTTP_INTERNAL_SERVER_ERROR, "application/json");
+            }
+        }
+    } else {
+        /* Disable VLAN - bring down and delete */
+        system("sudo nmcli connection down eth0.1 2>&1");
+        system("sudo nmcli connection delete eth0.1 2>&1");
+    }
+    
+    /* Save configuration */
+    pthread_mutex_lock(&config_mutex);
+    int save_result = config_save(config_file_path, &config);
+    pthread_mutex_unlock(&config_mutex);
+    
+    if (save_result != 0) {
+        return send_response(conn, "{\"error\":\"Failed to save config\"}", 33,
+                           MHD_HTTP_INTERNAL_SERVER_ERROR, "application/json");
+    }
+    
+    return send_response(conn, "{\"status\":\"success\"}", 21, MHD_HTTP_OK, "application/json");
+}
+
 static int request_handler(void *cls, struct MHD_Connection *conn,
                           const char *url, const char *method,
                           const char *version, const char *upload_data,
@@ -695,6 +1175,11 @@ static int request_handler(void *cls, struct MHD_Connection *conn,
     if (strcmp(url, "/api/display-modes") == 0) {
         return handle_get_display_modes(conn);
     }
+    if (strcmp(url, "/api/network/vlan") == 0) {
+        if (strcmp(method, "POST") == 0) {
+            return handle_post_network_vlan(conn, upload_data, upload_data_size, con_cls);
+        }
+    }
     
     return send_response(conn, "Not Found", 9, MHD_HTTP_NOT_FOUND, "text/plain");
 }
@@ -707,6 +1192,27 @@ static void request_completed(void *cls, struct MHD_Connection *conn,
         free_connection_info((struct connection_info *)*con_cls);
         *con_cls = NULL;
     }
+}
+
+static volatile int ws_running = 0;
+
+static void *ws_service_thread_func(void *arg) {
+    struct lws_context *context = (struct lws_context *)arg;
+    while (ws_running) {
+        lws_service(context, 50);
+    }
+    return NULL;
+}
+
+static void *broadcast_thread_func(void *arg) {
+    (void)arg;
+    while (ws_running) {
+        sleep(2);
+        if (ws_running) {
+            broadcast_network_stats();
+        }
+    }
+    return NULL;
 }
 
 int config_service_start(int port, const char *config_path) {
@@ -725,6 +1231,52 @@ int config_service_start(int port, const char *config_path) {
     if (!daemon) return -1;
     
     fprintf(stderr, "Config service started on port %d\n", port);
+    
+    /* Start WebSocket server on port+1 */
+    struct lws_context_creation_info info = {};
+    info.port = port + 1;
+    info.protocols = (struct lws_protocols[]) {
+        {
+            "network-stream",
+            ws_callback,
+            0,
+            1024,
+            0, NULL, 0
+        },
+        { NULL, NULL, 0, 0, 0, NULL, 0 }
+    };
+    info.gid = -1;
+    info.uid = -1;
+    
+    ws_context = lws_create_context(&info);
+    if (!ws_context) {
+        fprintf(stderr, "Failed to create WebSocket context\n");
+        return -1;
+    }
+    
+    fprintf(stderr, "WebSocket server started on port %d\n", port + 1);
+    
+    /* Start WebSocket service thread */
+    pthread_t ws_thread_id;
+    if (pthread_create(&ws_thread_id, NULL, ws_service_thread_func, (void *)ws_context) != 0) {
+        fprintf(stderr, "Failed to create WebSocket service thread\n");
+        ws_running = 0;
+        lws_context_destroy(ws_context);
+        ws_context = NULL;
+        return -1;
+    }
+    pthread_detach(ws_thread_id);
+    
+    /* Start broadcast thread */
+    ws_running = 1;
+    pthread_t broadcast_thread_id;
+    if (pthread_create(&broadcast_thread_id, NULL, broadcast_thread_func, NULL) != 0) {
+        ws_running = 0;
+        lws_context_destroy(ws_context);
+        ws_context = NULL;
+        return -1;
+    }
+    
     return 0;
 }
 
@@ -732,5 +1284,11 @@ void config_service_stop(void) {
     if (daemon) {
         MHD_stop_daemon(daemon);
         daemon = NULL;
+    }
+    
+    ws_running = 0;
+    if (ws_context) {
+        lws_context_destroy(ws_context);
+        ws_context = NULL;
     }
 }

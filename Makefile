@@ -1,9 +1,9 @@
 CC ?= gcc
-CFLAGS = -std=c99 -Wall -Wextra -O2 -I./include $(shell pkg-config --cflags libdrm libpng libmicrohttpd)
-LDFLAGS = $(shell pkg-config --libs libdrm libpng libmicrohttpd) -pthread
+CFLAGS = -std=c99 -Wall -Wextra -O2 -I./include $(shell pkg-config --cflags libdrm libpng libmicrohttpd libwebsockets)
+LDFLAGS = $(shell pkg-config --libs libdrm libpng libmicrohttpd libwebsockets) -pthread
 
 # Raspberry Pi 5 native build
-# Build dependencies: sudo apt install -y build-essential libdrm-dev libpng-dev libmicrohttpd-dev pkg-config
+# Build dependencies: sudo apt install -y build-essential libdrm-dev libpng-dev libmicrohttpd-dev libwebsockets-dev pkg-config
 
 # Main timecode application source files
 MAIN_SRCS = src/main.c src/drm.c src/font.c src/ltc.c src/gpio.c src/config-management.c src/config-watcher.c

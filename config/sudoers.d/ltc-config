@@ -1,3 +1,9 @@
 # Allow ltc-config user to manage system settings
 ltc-config ALL=(ALL) NOPASSWD: /usr/bin/timedatectl
 ltc-config ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart ltc-timecode
+ltc-config ALL=(ALL) NOPASSWD: /usr/bin/nmcli connection add *
+ltc-config ALL=(ALL) NOPASSWD: /usr/bin/nmcli connection modify *
+ltc-config ALL=(ALL) NOPASSWD: /usr/bin/nmcli connection delete *
+ltc-config ALL=(ALL) NOPASSWD: /usr/bin/nmcli connection up *
+ltc-config ALL=(ALL) NOPASSWD: /usr/bin/nmcli connection down *
+ltc-config ALL=(ALL) NOPASSWD: /usr/bin/nmcli connection show *

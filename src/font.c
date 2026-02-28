@@ -159,7 +159,7 @@ void font_blit_background(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, ui
 void font_blit_background_scaled(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
                                  uint32_t x, uint32_t y, float scale) {
     /* Render "8.8.8.8.8.8.8.8." - subtle dark gray visible on black canvas */
-    uint32_t glyph_color = 0xFF191919;   /* RGB(25, 25, 25) - dark plastic, subtle but visible */
+    uint32_t glyph_color = 0xFF0A0A0A;   /* RGB(10, 10, 10) - dark plastic, subtle but visible */
     const char *bg_pattern = "8.8.8.8.8.8.8.8.";
 
     font_blit_string_scaled(fb, fb_width, fb_height, fb_pitch,
@@ -202,10 +202,32 @@ static void font_blit_glyph_scaled_internal(uint8_t *fb, uint32_t fb_width, uint
             if (src_col >= glyph->width) src_col = glyph->width - 1;
 
             uint8_t gray_val = glyph->pixels[src_row * glyph->width + src_col];
-            if (gray_val > 128) {
+            if (gray_val > 0) {
                 uint32_t pixel_offset = ((y + row) * (fb_pitch / 4)) + (x + col);
                 uint32_t *pixel_ptr = (uint32_t *)&fb[pixel_offset * 4];
-                *pixel_ptr = fg_color;
+                
+                /* Alpha blend using grayscale value for smooth antialiasing */
+                float alpha = gray_val / 255.0f;
+                
+                /* Extract foreground RGBA */
+                uint8_t fg_a = (fg_color >> 24) & 0xFF;
+                uint8_t fg_r = (fg_color >> 16) & 0xFF;
+                uint8_t fg_g = (fg_color >> 8) & 0xFF;
+                uint8_t fg_b = fg_color & 0xFF;
+                
+                /* Extract background RGBA */
+                uint32_t bg_color = *pixel_ptr;
+                uint8_t bg_r = (bg_color >> 16) & 0xFF;
+                uint8_t bg_g = (bg_color >> 8) & 0xFF;
+                uint8_t bg_b = bg_color & 0xFF;
+                
+                /* Blend: out = fg * alpha + bg * (1 - alpha) */
+                uint8_t out_r = (uint8_t)(fg_r * alpha + bg_r * (1.0f - alpha));
+                uint8_t out_g = (uint8_t)(fg_g * alpha + bg_g * (1.0f - alpha));
+                uint8_t out_b = (uint8_t)(fg_b * alpha + bg_b * (1.0f - alpha));
+                
+                uint32_t out_color = (0xFF << 24) | (out_r << 16) | (out_g << 8) | out_b;
+                *pixel_ptr = out_color;
             }
         }
     }

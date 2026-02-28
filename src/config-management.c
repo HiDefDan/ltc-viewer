@@ -67,6 +67,13 @@ void config_default(ltc_config_t *config) {
     config->bg_color_r = 0;
     config->bg_color_g = 0;
     config->bg_color_b = 0;
+    
+    /* Network defaults */
+    config->admin_vlan_enabled = 0;
+    strcpy(config->admin_vlan_ip, "192.168.1.100/24");
+    strcpy(config->admin_vlan_gateway, "");
+    strcpy(config->web_ui_bind_address, "0.0.0.0");
+    config->web_ui_bind_port = 8080;
 }
 
 // Simple JSON string extraction helper
@@ -158,6 +165,13 @@ int config_from_json(const char *json_str, ltc_config_t *config) {
     json_extract_int(json_str, "bg_color_r", &config->bg_color_r);
     json_extract_int(json_str, "bg_color_g", &config->bg_color_g);
     json_extract_int(json_str, "bg_color_b", &config->bg_color_b);
+    
+    /* Network settings */
+    json_extract_int(json_str, "admin_vlan_enabled", &config->admin_vlan_enabled);
+    json_extract_string(json_str, "admin_vlan_ip", config->admin_vlan_ip, sizeof(config->admin_vlan_ip));
+    json_extract_string(json_str, "admin_vlan_gateway", config->admin_vlan_gateway, sizeof(config->admin_vlan_gateway));
+    json_extract_string(json_str, "web_ui_bind_address", config->web_ui_bind_address, sizeof(config->web_ui_bind_address));
+    json_extract_int(json_str, "web_ui_bind_port", &config->web_ui_bind_port);
 
     clamp_config_values(config);
     
@@ -183,7 +197,12 @@ char* config_to_json(const ltc_config_t *config) {
         "  \"color_b\": %d,\n"
         "  \"bg_color_r\": %d,\n"
         "  \"bg_color_g\": %d,\n"
-        "  \"bg_color_b\": %d\n"
+        "  \"bg_color_b\": %d,\n"
+        "  \"admin_vlan_enabled\": %d,\n"
+        "  \"admin_vlan_ip\": \"%s\",\n"
+        "  \"admin_vlan_gateway\": \"%s\",\n"
+        "  \"web_ui_bind_address\": \"%s\",\n"
+        "  \"web_ui_bind_port\": %d\n"
         "}\n",
         config->timezone,
         config->ntp_server,
@@ -198,7 +217,12 @@ char* config_to_json(const ltc_config_t *config) {
         config->color_b,
         config->bg_color_r,
         config->bg_color_g,
-        config->bg_color_b
+        config->bg_color_b,
+        config->admin_vlan_enabled,
+        config->admin_vlan_ip,
+        config->admin_vlan_gateway,
+        config->web_ui_bind_address,
+        config->web_ui_bind_port
     );
     
     return json;
