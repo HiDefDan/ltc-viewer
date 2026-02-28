@@ -40,9 +40,30 @@ static void clamp_config_values(ltc_config_t *config) {
         config->timecode_y_offset = max_y_offset;
     }
 
-    /* Allow X offset up to ±(width / 2) for horizontal centering flexibility */
-    int max_x_offset = config->display_width / 2;
-    if (max_x_offset < 0) max_x_offset = 0;
+    /*
+     * Keep full background pattern in bounds.
+     * Timecode is centered over 6 digits (HH.MM.SS), while background is
+     * "8.8.8.8.8.8.8.8." (8 digits) and starts one digit width to the left.
+     */
+    int scaled_digit_width = (int)(DISPLAY_DIGIT_WIDTH * scale + 0.5f);
+    if (scaled_digit_width < 1) {
+        scaled_digit_width = 1;
+    }
+
+    int scaled_timecode_width = 6 * scaled_digit_width;
+    int center_x = (config->display_width > scaled_timecode_width) ?
+                   ((config->display_width - scaled_timecode_width) / 2) : 0;
+
+    int min_text_x = scaled_digit_width;
+    int max_text_x = config->display_width - (7 * scaled_digit_width);
+
+    int max_left = center_x - min_text_x;
+    int max_right = max_text_x - center_x;
+
+    int max_x_offset = (max_left < max_right) ? max_left : max_right;
+    if (max_x_offset < 0) {
+        max_x_offset = 0;
+    }
 
     if (config->timecode_x_offset < -max_x_offset) {
         config->timecode_x_offset = -max_x_offset;

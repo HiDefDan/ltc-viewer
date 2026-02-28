@@ -746,6 +746,19 @@ static int handle_get_ntp_servers(struct MHD_Connection *conn) {
     return send_response(conn, response, strlen(response), MHD_HTTP_OK, "application/json");
 }
 
+static int is_allowed_broadcast_resolution(uint32_t width, uint32_t height) {
+    return (width == 1280 && height == 720) ||
+           (width == 1920 && height == 1080) ||
+           (width == 3840 && height == 2160);
+}
+
+static float mode_refresh_hz(const drmModeModeInfo *mode) {
+    if (mode->clock > 0 && mode->htotal > 0 && mode->vtotal > 0) {
+        return (float)mode->clock * 1000.0f / ((float)mode->htotal * (float)mode->vtotal);
+    }
+    return (float)mode->vrefresh;
+}
+
 static int handle_get_display_modes(struct MHD_Connection *conn) {
     /* Query DRM device for available display modes */
     int fd = -1;
@@ -811,7 +824,7 @@ static int handle_get_display_modes(struct MHD_Connection *conn) {
                            MHD_HTTP_NOT_FOUND, "application/json");
     }
     
-    /* First pass: collect all unique resolutions and refresh rates */
+    /* Collect DRM modes, then select only LTC-relevant CEA-nearest timings */
     typedef struct {
         uint32_t width;
         uint32_t height;
@@ -819,27 +832,24 @@ static int handle_get_display_modes(struct MHD_Connection *conn) {
         int is_preferred;
     } mode_entry_t;
 
-    typedef struct {
-        uint32_t width;
-        uint32_t height;
-    } resolution_t;
-
-    typedef struct {
-        float refresh;
-    } refresh_rate_t;
-
     mode_entry_t all_modes[512];
     int all_modes_count = 0;
-    resolution_t unique_resolutions[128];
-    int unique_resolutions_count = 0;
-    refresh_rate_t unique_refresh_rates[64];
-    int unique_refresh_rates_count = 0;
+
+    static const float target_rates[] = {
+        24.00f, 25.00f, 30.00f,
+        48.00f, 50.00f, 59.94f, 60.00f
+    };
+    const float pick_tolerance_hz = 0.25f;
 
     /* Collect all modes from connector */
     for (int i = 0; i < conn_drm->count_modes && all_modes_count < 512; i++) {
         drmModeModeInfo *mode = &conn_drm->modes[i];
-        float actual_refresh = (float)mode->clock * 1000.0f / 
-                               ((float)mode->htotal * (float)mode->vtotal);
+
+        if (!is_allowed_broadcast_resolution(mode->hdisplay, mode->vdisplay)) {
+            continue;
+        }
+
+        float actual_refresh = mode_refresh_hz(mode);
         int is_preferred = (mode->type & DRM_MODE_TYPE_PREFERRED) ? 1 : 0;
 
         /* De-duplicate exact mode entries */
@@ -862,50 +872,82 @@ static int handle_get_display_modes(struct MHD_Connection *conn) {
         }
     }
 
-    /* Extract unique resolutions */
-    for (int i = 0; i < all_modes_count && unique_resolutions_count < 128; i++) {
+    /* Build unique resolution list, sorted smallest to largest */
+    uint32_t resolutions[128][2];
+    int resolution_count = 0;
+
+    for (int i = 0; i < all_modes_count && resolution_count < 128; i++) {
         int duplicate = 0;
-        for (int j = 0; j < unique_resolutions_count; j++) {
-            if (unique_resolutions[j].width == all_modes[i].width &&
-                unique_resolutions[j].height == all_modes[i].height) {
+        for (int j = 0; j < resolution_count; j++) {
+            if (resolutions[j][0] == all_modes[i].width &&
+                resolutions[j][1] == all_modes[i].height) {
                 duplicate = 1;
                 break;
             }
         }
         if (!duplicate) {
-            unique_resolutions[unique_resolutions_count].width = all_modes[i].width;
-            unique_resolutions[unique_resolutions_count].height = all_modes[i].height;
-            unique_resolutions_count++;
+            resolutions[resolution_count][0] = all_modes[i].width;
+            resolutions[resolution_count][1] = all_modes[i].height;
+            resolution_count++;
         }
     }
 
-    /* Extract unique refresh rates globally (if 50Hz exists anywhere, offer at all resolutions) */
-    for (int i = 0; i < all_modes_count && unique_refresh_rates_count < 64; i++) {
-        int duplicate = 0;
-        for (int j = 0; j < unique_refresh_rates_count; j++) {
-            if (fabsf(unique_refresh_rates[j].refresh - all_modes[i].refresh) < 0.01f) {
-                duplicate = 1;
-                break;
-            }
-        }
-        if (!duplicate) {
-            unique_refresh_rates[unique_refresh_rates_count].refresh = all_modes[i].refresh;
-            unique_refresh_rates_count++;
-        }
-    }
-
-    /* Sort refresh rates descending */
-    for (int i = 0; i < unique_refresh_rates_count - 1; i++) {
-        for (int j = i + 1; j < unique_refresh_rates_count; j++) {
-            if (unique_refresh_rates[j].refresh > unique_refresh_rates[i].refresh) {
-                float tmp = unique_refresh_rates[i].refresh;
-                unique_refresh_rates[i].refresh = unique_refresh_rates[j].refresh;
-                unique_refresh_rates[j].refresh = tmp;
+    for (int i = 0; i < resolution_count - 1; i++) {
+        for (int j = i + 1; j < resolution_count; j++) {
+            uint64_t area_i = (uint64_t)resolutions[i][0] * (uint64_t)resolutions[i][1];
+            uint64_t area_j = (uint64_t)resolutions[j][0] * (uint64_t)resolutions[j][1];
+            if (area_j < area_i) {
+                uint32_t tmp_w = resolutions[i][0];
+                uint32_t tmp_h = resolutions[i][1];
+                resolutions[i][0] = resolutions[j][0];
+                resolutions[i][1] = resolutions[j][1];
+                resolutions[j][0] = tmp_w;
+                resolutions[j][1] = tmp_h;
             }
         }
     }
 
-    /* Second pass: emit all combinations of resolution × refresh rate */
+    mode_entry_t selected_modes[512];
+    int selected_modes_count = 0;
+
+    for (int r = 0; r < resolution_count; r++) {
+        uint32_t width = resolutions[r][0];
+        uint32_t height = resolutions[r][1];
+
+        for (size_t t = 0; t < sizeof(target_rates) / sizeof(target_rates[0]); t++) {
+            float target = target_rates[t];
+            int best_index = -1;
+            float best_delta = 999.0f;
+
+            for (int i = 0; i < all_modes_count; i++) {
+                if (all_modes[i].width != width || all_modes[i].height != height) {
+                    continue;
+                }
+                float delta = fabsf(all_modes[i].refresh - target);
+                if (delta < best_delta) {
+                    best_delta = delta;
+                    best_index = i;
+                }
+            }
+
+            if (best_index >= 0 && best_delta <= pick_tolerance_hz && selected_modes_count < 512) {
+                int duplicate = 0;
+                for (int i = 0; i < selected_modes_count; i++) {
+                    if (selected_modes[i].width == all_modes[best_index].width &&
+                        selected_modes[i].height == all_modes[best_index].height &&
+                        fabsf(selected_modes[i].refresh - all_modes[best_index].refresh) < 0.01f) {
+                        duplicate = 1;
+                        break;
+                    }
+                }
+                if (!duplicate) {
+                    selected_modes[selected_modes_count++] = all_modes[best_index];
+                }
+            }
+        }
+    }
+
+    /* Emit only selected real DRM-backed combinations */
     char *pos = response;
     int remaining = sizeof(response);
     int written = snprintf(pos, remaining, "{\"modes\":[");
@@ -915,45 +957,30 @@ static int handle_get_display_modes(struct MHD_Connection *conn) {
     int emitted = 0;
     int preferred_index = -1;
 
-    /* For each combination, find if it exists in all_modes and use its preferred flag */
-    for (int r = 0; r < unique_resolutions_count; r++) {
-        for (int f = 0; f < unique_refresh_rates_count; f++) {
-            uint32_t width = unique_resolutions[r].width;
-            uint32_t height = unique_resolutions[r].height;
-            float refresh = unique_refresh_rates[f].refresh;
-
-            /* Find mode entry for this combination (if it exists) */
-            int is_preferred = 0;
-            for (int m = 0; m < all_modes_count; m++) {
-                if (all_modes[m].width == width &&
-                    all_modes[m].height == height &&
-                    fabsf(all_modes[m].refresh - refresh) < 0.01f) {
-                    is_preferred = all_modes[m].is_preferred;
-                    break;
-                }
-            }
-
-            /* Always emit the mode (even if not in DRM list, monitor usually supports it) */
-            if (remaining > 100 && emitted < 512) {
-                if (emitted > 0) {
-                    written = snprintf(pos, remaining, ", ");
-                    pos += written;
-                    remaining -= written;
-                }
-
-                written = snprintf(pos, remaining,
-                                   "{\"width\":%u,\"height\":%u,\"refresh\":%.2f,\"preferred\":%s}",
-                                   width, height, refresh,
-                                   is_preferred ? "true" : "false");
-                pos += written;
-                remaining -= written;
-
-                if (is_preferred && preferred_index < 0) {
-                    preferred_index = emitted;
-                }
-                emitted++;
-            }
+    for (int i = 0; i < selected_modes_count; i++) {
+        if (remaining <= 100 || emitted >= 512) {
+            break;
         }
+
+        if (emitted > 0) {
+            written = snprintf(pos, remaining, ", ");
+            pos += written;
+            remaining -= written;
+        }
+
+        written = snprintf(pos, remaining,
+                           "{\"width\":%u,\"height\":%u,\"refresh\":%.2f,\"preferred\":%s}",
+                           selected_modes[i].width,
+                           selected_modes[i].height,
+                           selected_modes[i].refresh,
+                           selected_modes[i].is_preferred ? "true" : "false");
+        pos += written;
+        remaining -= written;
+
+        if (selected_modes[i].is_preferred && preferred_index < 0) {
+            preferred_index = emitted;
+        }
+        emitted++;
     }
 
     if (preferred_index >= 0) {

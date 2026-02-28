@@ -10,6 +10,9 @@ class ConfigManager {
         this.wsReconnectDelay = 1500;
         this.configRevision = 0;
         this.isRemoteConfigSyncing = false;
+        this.livePositionUpdateTimer = null;
+        this.livePositionUpdateInFlight = false;
+        this.livePositionUpdateQueued = false;
         this.init();
     }
 
@@ -50,7 +53,17 @@ class ConfigManager {
     }
 
     getMaxXOffsetForResolution(width, height) {
-        return Math.max(0, width / 2);
+        const scale = this.getGlyphScale(width, height);
+        const scaledDigitWidth = Math.max(1, Math.round(209 * scale));
+        const scaledTimecodeWidth = 6 * scaledDigitWidth;
+        const centerX = (width > scaledTimecodeWidth) ? Math.floor((width - scaledTimecodeWidth) / 2) : 0;
+
+        const minTextX = scaledDigitWidth;
+        const maxTextX = width - (7 * scaledDigitWidth);
+
+        const maxLeft = centerX - minTextX;
+        const maxRight = maxTextX - centerX;
+        return Math.max(0, Math.floor(Math.min(maxLeft, maxRight)));
     }
 
     clampTimecodeXOffset(value, width, height) {
@@ -69,18 +82,117 @@ class ConfigManager {
 
     updateTimecodeYBounds(width, height) {
         const yInput = document.getElementById('timecodeYOffset');
+        const ySlider = document.getElementById('timecodeYOffsetSlider');
         const maxOffset = this.getMaxYOffsetForResolution(width, height);
-        yInput.max = String(Math.floor(maxOffset));
-        yInput.min = String(-Math.floor(maxOffset));
-        yInput.value = this.clampTimecodeYOffset(parseInt(yInput.value), width, height);
+        const maxValue = String(Math.floor(maxOffset));
+        const minValue = String(-Math.floor(maxOffset));
+        const clamped = this.clampTimecodeYOffset(parseInt(yInput.value), width, height);
+
+        yInput.max = maxValue;
+        yInput.min = minValue;
+        yInput.value = clamped;
+
+        if (ySlider) {
+            ySlider.max = maxValue;
+            ySlider.min = minValue;
+            ySlider.value = clamped;
+        }
     }
 
     updateTimecodeXBounds(width, height) {
         const xInput = document.getElementById('timecodeXOffset');
+        const xSlider = document.getElementById('timecodeXOffsetSlider');
         const maxOffset = this.getMaxXOffsetForResolution(width, height);
-        xInput.max = String(Math.floor(maxOffset));
-        xInput.min = String(-Math.floor(maxOffset));
-        xInput.value = this.clampTimecodeXOffset(parseInt(xInput.value), width, height);
+        const maxValue = String(Math.floor(maxOffset));
+        const minValue = String(-Math.floor(maxOffset));
+        const clamped = this.clampTimecodeXOffset(parseInt(xInput.value), width, height);
+
+        xInput.max = maxValue;
+        xInput.min = minValue;
+        xInput.value = clamped;
+
+        if (xSlider) {
+            xSlider.max = maxValue;
+            xSlider.min = minValue;
+            xSlider.value = clamped;
+        }
+    }
+
+    getSelectedResolution() {
+        return this.parseResolutionValue(document.getElementById('displayResolution').value);
+    }
+
+    syncOffsetInputs(axis, rawValue) {
+        const selectedResolution = this.getSelectedResolution();
+        const isY = axis === 'y';
+        const clamped = isY
+            ? this.clampTimecodeYOffset(parseInt(rawValue), selectedResolution.width, selectedResolution.height)
+            : this.clampTimecodeXOffset(parseInt(rawValue), selectedResolution.width, selectedResolution.height);
+
+        if (isY) {
+            document.getElementById('timecodeYOffset').value = clamped;
+            document.getElementById('timecodeYOffsetSlider').value = clamped;
+        } else {
+            document.getElementById('timecodeXOffset').value = clamped;
+            document.getElementById('timecodeXOffsetSlider').value = clamped;
+        }
+    }
+
+    queueLivePositionUpdate() {
+        if (this.isRemoteConfigSyncing) {
+            return;
+        }
+
+        if (this.livePositionUpdateTimer) {
+            clearTimeout(this.livePositionUpdateTimer);
+        }
+
+        this.livePositionUpdateTimer = setTimeout(() => {
+            this.livePositionUpdateTimer = null;
+            this.applyLivePositionUpdate();
+        }, 120);
+    }
+
+    async applyLivePositionUpdate() {
+        if (this.livePositionUpdateInFlight) {
+            this.livePositionUpdateQueued = true;
+            return;
+        }
+
+        this.livePositionUpdateInFlight = true;
+
+        try {
+            const config = this.buildConfigPayload(true);
+            const response = await fetch('/api/config', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(config)
+            });
+
+            const responseData = await response.json().catch(() => ({}));
+
+            if (response.ok) {
+                if (responseData.config_revision) {
+                    this.configRevision = responseData.config_revision;
+                }
+                this.config.timecode_x_offset = config.timecode_x_offset;
+                this.config.timecode_y_offset = config.timecode_y_offset;
+            } else if (response.status === 409) {
+                this.isRemoteConfigSyncing = true;
+                this.setSaveLock(true, 'Syncing...');
+                await this.loadConfig();
+            }
+        } catch (e) {
+            console.error('Live position update failed:', e);
+        } finally {
+            this.livePositionUpdateInFlight = false;
+            if (this.livePositionUpdateQueued) {
+                this.livePositionUpdateQueued = false;
+                this.applyLivePositionUpdate();
+            }
+        }
     }
 
     async init() {
@@ -109,6 +221,30 @@ class ConfigManager {
             this.populateRefreshRateSelect(selected.width, selected.height);
             this.updateTimecodeYBounds(selected.width, selected.height);
             this.updateTimecodeXBounds(selected.width, selected.height);
+            this.queueLivePositionUpdate();
+        });
+
+        const yInput = document.getElementById('timecodeYOffset');
+        const xInput = document.getElementById('timecodeXOffset');
+        const ySlider = document.getElementById('timecodeYOffsetSlider');
+        const xSlider = document.getElementById('timecodeXOffsetSlider');
+
+        yInput.addEventListener('input', (e) => {
+            this.syncOffsetInputs('y', e.target.value);
+            this.queueLivePositionUpdate();
+        });
+        ySlider.addEventListener('input', (e) => {
+            this.syncOffsetInputs('y', e.target.value);
+            this.queueLivePositionUpdate();
+        });
+
+        xInput.addEventListener('input', (e) => {
+            this.syncOffsetInputs('x', e.target.value);
+            this.queueLivePositionUpdate();
+        });
+        xSlider.addEventListener('input', (e) => {
+            this.syncOffsetInputs('x', e.target.value);
+            this.queueLivePositionUpdate();
         });
 
         // Color sliders
@@ -459,25 +595,7 @@ class ConfigManager {
     }
 
     async saveConfig() {
-        const selectedResolution = this.parseResolutionValue(document.getElementById('displayResolution').value);
-        const config = {
-            timezone: document.getElementById('timezone').value,
-            ntp_server: document.getElementById('ntpServer').value,
-            display_width: selectedResolution.width,
-            display_height: selectedResolution.height,
-            refresh_hz: parseFloat(document.getElementById('refreshHz').value),
-            timecode_x_offset: this.clampTimecodeXOffset(parseInt(document.getElementById('timecodeXOffset').value), selectedResolution.width, selectedResolution.height),
-            timecode_y_offset: this.clampTimecodeYOffset(parseInt(document.getElementById('timecodeYOffset').value), selectedResolution.width, selectedResolution.height),
-            color_r: parseInt(document.getElementById('colorR').value),
-            color_g: parseInt(document.getElementById('colorG').value),
-            color_b: parseInt(document.getElementById('colorB').value),
-            custom_ntp_servers: this.config.custom_ntp_servers || '[]',
-            admin_vlan_enabled: document.getElementById('adminVlanEnabled').checked ? 1 : 0,
-            admin_vlan_ip: document.getElementById('adminVlanIp').value || '192.168.1.100/24',
-            admin_vlan_gateway: document.getElementById('adminVlanGateway').value || '',
-            web_ui_bind_address: document.getElementById('webUiBindAddress').value || '0.0.0.0',
-            web_ui_bind_port: parseInt(document.getElementById('webUiBindPort').value) || 8080
-        };
+        const config = this.buildConfigPayload(false);
 
         try {
             const response = await fetch('/api/config', {
@@ -518,10 +636,20 @@ class ConfigManager {
         }
 
         const yInput = document.getElementById('timecodeYOffset');
-        yInput.value = this.clampTimecodeYOffset(this.config.timecode_y_offset || 0, configWidth, configHeight);
+        const clampedY = this.clampTimecodeYOffset(this.config.timecode_y_offset || 0, configWidth, configHeight);
+        yInput.value = clampedY;
+        const ySlider = document.getElementById('timecodeYOffsetSlider');
+        if (ySlider) {
+            ySlider.value = clampedY;
+        }
 
         const xInput = document.getElementById('timecodeXOffset');
-        xInput.value = this.clampTimecodeXOffset(this.config.timecode_x_offset || 0, configWidth, configHeight);
+        const clampedX = this.clampTimecodeXOffset(this.config.timecode_x_offset || 0, configWidth, configHeight);
+        xInput.value = clampedX;
+        const xSlider = document.getElementById('timecodeXOffsetSlider');
+        if (xSlider) {
+            xSlider.value = clampedX;
+        }
 
         document.getElementById('colorR').value = this.config.color_r || 64;
         document.getElementById('colorRValue').value = this.config.color_r || 64;
@@ -617,6 +745,14 @@ class ConfigManager {
                     const data = JSON.parse(event.data);
                     if (data.type === 'config_update') {
                         const incomingRevision = data.config_revision || 0;
+
+                        if (this.livePositionUpdateInFlight || this.livePositionUpdateTimer) {
+                            if (incomingRevision > this.configRevision) {
+                                this.configRevision = incomingRevision;
+                            }
+                            return;
+                        }
+
                         if (incomingRevision > this.configRevision) {
                             this.isRemoteConfigSyncing = true;
                             this.setSaveLock(true, 'Syncing...');
@@ -767,33 +903,17 @@ class ConfigManager {
 
         this.setSaveLock(true, 'Saving...');
 
-        const selectedResolution = this.parseResolutionValue(document.getElementById('displayResolution').value);
+        const selectedResolution = this.getSelectedResolution();
         const yInput = document.getElementById('timecodeYOffset');
         const xInput = document.getElementById('timecodeXOffset');
         const clampedY = this.clampTimecodeYOffset(parseInt(yInput.value), selectedResolution.width, selectedResolution.height);
         const clampedX = this.clampTimecodeXOffset(parseInt(xInput.value), selectedResolution.width, selectedResolution.height);
         yInput.value = clampedY;
         xInput.value = clampedX;
+        document.getElementById('timecodeYOffsetSlider').value = clampedY;
+        document.getElementById('timecodeXOffsetSlider').value = clampedX;
 
-        const config = {
-            config_revision: this.configRevision,
-            timezone: document.getElementById('timezone').value,
-            ntp_server: document.getElementById('ntpServer').value,
-            display_width: selectedResolution.width,
-            display_height: selectedResolution.height,
-            refresh_hz: parseFloat(document.getElementById('refreshHz').value),
-            timecode_x_offset: clampedX,
-            timecode_y_offset: clampedY,
-            color_r: parseInt(document.getElementById('colorR').value),
-            color_g: parseInt(document.getElementById('colorG').value),
-            color_b: parseInt(document.getElementById('colorB').value),
-            custom_ntp_servers: this.config.custom_ntp_servers || '[]',
-            admin_vlan_enabled: document.getElementById('adminVlanEnabled').checked ? 1 : 0,
-            admin_vlan_ip: document.getElementById('adminVlanIp').value || '192.168.1.100/24',
-            admin_vlan_gateway: document.getElementById('adminVlanGateway').value || '',
-            web_ui_bind_address: document.getElementById('webUiBindAddress').value || '0.0.0.0',
-            web_ui_bind_port: parseInt(document.getElementById('webUiBindPort').value) || 8080
-        };
+        const config = this.buildConfigPayload(true);
 
         this.showStatus('Saving configuration...', 'loading');
 
@@ -860,6 +980,8 @@ class ConfigManager {
             this.updateTimecodeXBounds(BASE_DISPLAY_WIDTH, BASE_DISPLAY_HEIGHT);
             document.getElementById('timecodeYOffset').value = 0;
             document.getElementById('timecodeXOffset').value = 0;
+            document.getElementById('timecodeYOffsetSlider').value = 0;
+            document.getElementById('timecodeXOffsetSlider').value = 0;
 
             document.getElementById('colorR').value = 64;
             document.getElementById('colorRValue').value = 64;
@@ -878,6 +1000,53 @@ class ConfigManager {
             this.updateColorPreview('colorPreview');
             this.setRegionFromTimezone('Europe/London');
         }
+    }
+
+    buildConfigPayload(withRevision) {
+        const selectedResolution = this.getSelectedResolution();
+        const yInput = document.getElementById('timecodeYOffset');
+        const xInput = document.getElementById('timecodeXOffset');
+        const timezoneValue = document.getElementById('timezone').value || this.config.timezone || 'Europe/London';
+        const ntpValue = document.getElementById('ntpServer').value || this.config.ntp_server || 'pool.ntp.org';
+        const clampedY = this.clampTimecodeYOffset(parseInt(yInput.value), selectedResolution.width, selectedResolution.height);
+        const clampedX = this.clampTimecodeXOffset(parseInt(xInput.value), selectedResolution.width, selectedResolution.height);
+
+        yInput.value = clampedY;
+        xInput.value = clampedX;
+
+        const ySlider = document.getElementById('timecodeYOffsetSlider');
+        const xSlider = document.getElementById('timecodeXOffsetSlider');
+        if (ySlider) {
+            ySlider.value = clampedY;
+        }
+        if (xSlider) {
+            xSlider.value = clampedX;
+        }
+
+        const config = {
+            timezone: timezoneValue,
+            ntp_server: ntpValue,
+            display_width: selectedResolution.width,
+            display_height: selectedResolution.height,
+            refresh_hz: parseFloat(document.getElementById('refreshHz').value),
+            timecode_x_offset: clampedX,
+            timecode_y_offset: clampedY,
+            color_r: parseInt(document.getElementById('colorR').value),
+            color_g: parseInt(document.getElementById('colorG').value),
+            color_b: parseInt(document.getElementById('colorB').value),
+            custom_ntp_servers: this.config.custom_ntp_servers || '[]',
+            admin_vlan_enabled: document.getElementById('adminVlanEnabled').checked ? 1 : 0,
+            admin_vlan_ip: document.getElementById('adminVlanIp').value || '192.168.1.100/24',
+            admin_vlan_gateway: document.getElementById('adminVlanGateway').value || '',
+            web_ui_bind_address: document.getElementById('webUiBindAddress').value || '0.0.0.0',
+            web_ui_bind_port: parseInt(document.getElementById('webUiBindPort').value) || 8080
+        };
+
+        if (withRevision) {
+            config.config_revision = this.configRevision;
+        }
+
+        return config;
     }
 
     showStatus(message, type) {

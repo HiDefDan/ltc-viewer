@@ -229,26 +229,43 @@ int main(int argc, char *argv[]) {
 
         /* Calculate scaled string width for horizontal centering */
         /* Timecode is "HH.MM.SS" = 6 digits + 2 periods (periods overlay, spacing=0) */
-        uint32_t base_string_width = 6 * DISPLAY_DIGIT_WIDTH;  /* 1254px at 1080p baseline */
+        uint32_t base_string_width = 6 * DISPLAY_DIGIT_WIDTH;
         uint32_t scaled_string_width = (uint32_t)(base_string_width * glyph_scale + 0.5f);
-        
-        /* Calculate horizontal center and apply offset */
-        uint32_t center_x = (render_width > scaled_string_width) ?
-                           ((render_width - scaled_string_width) / 2) : 0;
-        uint32_t text_x_final = center_x + current_config.timecode_x_offset;
-        /* Clamp to valid range */
-        if (text_x_final + scaled_string_width > render_width) {
-            text_x_final = render_width - scaled_string_width;
+
+        /* Calculate scaled digit width for background bounds */
+        uint32_t scaled_digit_width = (uint32_t)(DISPLAY_DIGIT_WIDTH * glyph_scale + 0.5f);
+        if (scaled_digit_width == 0) {
+            scaled_digit_width = 1;
         }
-        if ((int32_t)text_x_final < 0) {
+
+        /* Center timecode, then clamp so full 8-digit background stays on screen */
+        int32_t center_x = (render_width > scaled_string_width) ?
+                           (int32_t)((render_width - scaled_string_width) / 2) : 0;
+        int32_t text_x_final = center_x + current_config.timecode_x_offset;
+
+        int32_t min_text_x = (int32_t)scaled_digit_width;
+        int32_t max_text_x = (int32_t)render_width - (int32_t)(7 * scaled_digit_width);
+        if (text_x_final < min_text_x) {
+            text_x_final = min_text_x;
+        }
+        if (text_x_final > max_text_x) {
+            text_x_final = max_text_x;
+        }
+
+        if (text_x_final < 0) {
             text_x_final = 0;
+        }
+        if ((uint32_t)text_x_final + scaled_string_width > render_width) {
+            text_x_final = (int32_t)(render_width - scaled_string_width);
+            if (text_x_final < 0) {
+                text_x_final = 0;
+            }
         }
 
         /* Background "8.8.8.8.8.8.8.8." positioned 1 digit width left of timecode */
         /* Config X offset centers the background relative to screen */
-        uint32_t scaled_digit_width = (uint32_t)(DISPLAY_DIGIT_WIDTH * glyph_scale + 0.5f);
-        uint32_t bg_x = (text_x_final > scaled_digit_width) ?
-                (text_x_final - scaled_digit_width) : 0;
+        uint32_t bg_x = ((uint32_t)text_x_final > scaled_digit_width) ?
+            ((uint32_t)text_x_final - scaled_digit_width) : 0;
         
         /* Render background layer (unlit 7-segment grid) */
         font_blit_background_scaled(back_buffer, render_width, render_height, drm.back.pitch,
@@ -273,7 +290,7 @@ int main(int argc, char *argv[]) {
         
         /* Render timecode with configured color and position */
         /* Use center-relative offsets for both X and Y */
-        uint32_t text_x = text_x_final;
+        uint32_t text_x = (uint32_t)text_x_final;
         uint32_t text_y = text_y_final;
         uint32_t text_color = ((current_config.color_r << 16) |
                                (current_config.color_g << 8) |

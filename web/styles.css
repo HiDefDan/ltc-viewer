@@ -9,11 +9,12 @@ body {
     background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
     color: #e0e0e0;
     min-height: 100vh;
-    padding: 20px;
+    padding: 12px;
 }
 
 .container {
-    max-width: 600px;
+    width: 100%;
+    max-width: 1200px;
     margin: 0 auto;
     background: #0d0d0d;
     border-radius: 12px;
@@ -21,33 +22,26 @@ body {
     overflow: hidden;
 }
 
-.header {
-    background: linear-gradient(135deg, #40ff40 0%, #30dd30 100%);
-    color: #000;
-    padding: 40px 30px;
-    text-align: center;
-}
-
-.header h1 {
-    font-size: 28px;
-    font-weight: 600;
-    margin-bottom: 8px;
-}
-
-.header .subtitle {
-    font-size: 14px;
-    opacity: 0.8;
-}
-
 .config-form {
-    padding: 30px;
+    padding: 20px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 20px;
+}
+
+.config-form > fieldset {
+    margin-bottom: 0;
+}
+
+.button-group,
+.status-message {
+    grid-column: 1 / -1;
 }
 
 fieldset {
     border: 1px solid #333;
     border-radius: 8px;
     padding: 20px;
-    margin-bottom: 20px;
     background: #1a1a1a;
 }
 
@@ -66,6 +60,21 @@ legend {
 
 .form-group:last-child {
     margin-bottom: 0;
+}
+
+.offset-control {
+    width: 100%;
+}
+
+.offset-input-row {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 12px;
+    align-items: center;
+}
+
+.offset-slider {
+    width: 100%;
 }
 
 label {
@@ -262,12 +271,10 @@ input[type="range"]::-moz-range-thumb {
         border-radius: 0;
     }
 
-    .header {
-        padding: 30px 20px;
-    }
-
     .config-form {
-        padding: 20px;
+        padding: 16px;
+        grid-template-columns: 1fr;
+        gap: 16px;
     }
 
     fieldset {
