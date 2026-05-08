@@ -108,7 +108,7 @@ sudo systemctl restart ltc-timecode
 Check frame timing and latency:
 
 ```bash
-# Monitor framerate (should be ~50 Hz)
+# Monitor framerate (should match configured refresh, default ~60 Hz)
 sudo journalctl -u ltc-timecode -f | grep "Frame"
 
 # Check for CPU throttling

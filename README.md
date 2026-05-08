@@ -64,7 +64,8 @@ amixer sset ADC 0db
 ```bash
 # Boot into TTY (no X, no compositor)
 # Edit /boot/firmware/cmdline.txt:
-#   console=tty3 vt.global_cursor_default=0 loglevel=3
+#   Use the CM5 DSI-1 line from BOOT_CONFIG.md
+#   (includes video=DSI-1:480x1920M@60e,rotate=90 and HDMI disable flags)
 
 # Fix timezone (for systemd locale)
 sudo timedatectl set-timezone Europe/London

@@ -10,18 +10,40 @@ Configure Raspberry Pi Compute Module 5 to boot into a minimal "kiosk mode" with
 Add or modify these settings:
 
 ```ini
-# Minimal boot (no splash screen)
-disable_splash=1
+dtparam=audio=on
+auto_initramfs=1
 
-# Disable Plymouth boot animation
-avoid_init=48
-avoid_init=49
-
-# Standard KMS driver (remove any vc4-fkms-v3d lines)
+# Core Driver
 dtoverlay=vc4-kms-v3d
 
-# Waveshare 8.8" DSI Touch A on DSI1
-dtoverlay=vc4-kms-dsi-waveshare-panel-v2,8_8_inch_a
+# DSI panel selection (keep only one active)
+# DSI1 Use
+# dtoverlay=vc4-kms-dsi-waveshare-panel-v2,8_8_inch_a
+# DSI0 Use
+dtoverlay=vc4-kms-dsi-waveshare-panel-v2,8_8_inch_a,dsi0
+
+# IMPORTANT: Comment this out or delete it
+# disable_fw_kms_setup=1
+
+# Ensure DSI is checked first
+display_default_lcd=1
+
+# For RPi 4/5, explicitly set FB assignment priority
+# 0 = DSI/LCD, 2 = HDMI0, 7 = HDMI1
+framebuffer_priority=0
+
+# Disable auto-detect to prevent HDMI from stealing slot 0 during hotplug
+display_auto_detect=0
+
+arm_64bit=1
+disable_overscan=1
+arm_boost=1
+
+[cm5]
+dtoverlay=dwc2,dr_mode=host
+dtparam=rtc_bbat_vchg=3000000
+
+[all]
 
 # HiFiBerry Studio DAC+ADC HAT
 dtoverlay=hifiberry-dacplusadcpro
