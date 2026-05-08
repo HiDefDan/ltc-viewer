@@ -24,8 +24,8 @@ typedef unsigned int drm_drawable_t;
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
-/* Helper: find connector by type (HDMI preferred) */
-static int find_hdmi_connector(int fd, uint32_t *connector_id) {
+/* Helper: find connector - prefers DSI (Waveshare 8.8" panel), falls back to HDMI */
+static int find_display_connector(int fd, uint32_t *connector_id) {
     drmModeRes *res = drmModeGetResources(fd);
     if (!res) {
         fprintf(stderr, "drmModeGetResources failed\n");
@@ -34,27 +34,34 @@ static int find_hdmi_connector(int fd, uint32_t *connector_id) {
 
     printf("[DRM] Found %d connectors\n", res->count_connectors);
 
+    uint32_t dsi_id = 0, hdmi_id = 0;
+
     for (int i = 0; i < res->count_connectors; i++) {
         drmModeConnector *conn = drmModeGetConnector(fd, res->connectors[i]);
         if (!conn) continue;
 
         printf("[DRM] Connector %d: type=%d, status=%d\n", i, conn->connector_type, conn->connection);
 
-        /* Look for HDMI connector that is connected */
-        if ((conn->connector_type == DRM_MODE_CONNECTOR_HDMIA ||
-             conn->connector_type == DRM_MODE_CONNECTOR_HDMIB) &&
-            conn->connection == DRM_MODE_CONNECTED) {
-            printf("[DRM] Found connected HDMI connector\n");
-            *connector_id = res->connectors[i];
-            drmModeFreeConnector(conn);
-            drmModeFreeResources(res);
-            return 0;
+        if (conn->connection == DRM_MODE_CONNECTED) {
+            if (conn->connector_type == DRM_MODE_CONNECTOR_DSI && !dsi_id) {
+                dsi_id = res->connectors[i];
+                printf("[DRM] Found connected DSI connector\n");
+            } else if ((conn->connector_type == DRM_MODE_CONNECTOR_HDMIA ||
+                        conn->connector_type == DRM_MODE_CONNECTOR_HDMIB) && !hdmi_id) {
+                hdmi_id = res->connectors[i];
+                printf("[DRM] Found connected HDMI connector\n");
+            }
         }
         drmModeFreeConnector(conn);
     }
 
-    printf("[DRM] No connected HDMI connector found\n");
     drmModeFreeResources(res);
+
+    /* Prefer DSI (Waveshare panel); fall back to HDMI */
+    if (dsi_id) { *connector_id = dsi_id; return 0; }
+    if (hdmi_id) { *connector_id = hdmi_id; return 0; }
+
+    fprintf(stderr, "[DRM] No connected DSI or HDMI connector found\n");
     return -1;
 }
 
@@ -233,9 +240,9 @@ int drm_init(ltc_drm_context_t *ctx, uint32_t target_width, uint32_t target_heig
 
     printf("[DRM] Opened device (fd=%d)\n", ctx->fd);
 
-    /* Find HDMI connector */
-    if (find_hdmi_connector(ctx->fd, &ctx->connector_id)) {
-        fprintf(stderr, "No HDMI connector found\n");
+    /* Find display connector (DSI preferred, HDMI fallback) */
+    if (find_display_connector(ctx->fd, &ctx->connector_id)) {
+        fprintf(stderr, "No display connector found\n");
         close(ctx->fd);
         return -1;
     }

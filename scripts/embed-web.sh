@@ -9,6 +9,11 @@ if [ -z "$OUTPUT_FILE" ]; then
     exit 1
 fi
 
+if ! command -v xxd >/dev/null 2>&1; then
+    echo "Error: xxd is required to embed web assets. Install it with: sudo apt install -y xxd" >&2
+    exit 1
+fi
+
 cat > "$OUTPUT_FILE" << 'EOF'
 /* Auto-generated embedded web files. Do not edit. */
 

@@ -1,7 +1,7 @@
-# Boot Configuration for Raspberry Pi 5 LTC Reader
+# Boot Configuration for CM5 LTC Reader
 
 ## Objective
-Configure Raspberry Pi 5 to boot into a minimal "kiosk mode" with no X11/Wayland, direct framebuffer access via DRM/KMS, and vblank-synced rendering.
+Configure Raspberry Pi Compute Module 5 to boot into a minimal "kiosk mode" with no X11/Wayland, direct framebuffer access via DRM/KMS, and vblank-synced rendering.
 
 ## Steps
 
@@ -17,8 +17,21 @@ disable_splash=1
 avoid_init=48
 avoid_init=49
 
-# Disable FKMS (use standard KMS driver)
-# (Remove or comment out any `dtoverlay=vc4-fkms-v3d` lines)
+# Standard KMS driver (remove any vc4-fkms-v3d lines)
+dtoverlay=vc4-kms-v3d
+
+# Waveshare 8.8" DSI Touch A on DSI1
+dtoverlay=vc4-kms-dsi-waveshare-panel-v2,8_8_inch_a
+
+# HiFiBerry Studio DAC+ADC HAT
+dtoverlay=hifiberry-dacplusadcpro
+
+# CM5 fan: PWM speed control (30x7mm, 5V)
+# Temperatures in millidegrees Celsius; speed 0-255
+dtparam=fan_temp0=40000,fan_temp0_hyst=2000,fan_temp0_speed=100
+dtparam=fan_temp1=50000,fan_temp1_hyst=3000,fan_temp1_speed=160
+dtparam=fan_temp2=60000,fan_temp2_hyst=4000,fan_temp2_speed=210
+dtparam=fan_temp3=70000,fan_temp3_hyst=5000,fan_temp3_speed=255
 ```
 
 ### 2. Edit `/boot/firmware/cmdline.txt`
@@ -30,14 +43,13 @@ console=serial0,115200 console=tty1 root=PARTUUID=68f99be8-02 rootfstype=ext4 fs
 ```
 new
 ```
-console=serial0,115200 console=tty3 vt.global_cursor_default=0 loglevel=3 quiet root=PARTUUID=68f99be8-02 rootfstype=ext4 fsck.repair=yes rootwait cfg80211.ieee80211_regdom=GB
+video=DSI-1:480x1920M@60e,rotate=90 video=HDMI-A-1:d video=HDMI-A-2:d console=tty1 console=serial0,115200 root=PARTUUID=68f99be8-02 rootfstype=ext4 fsck.repair=yes rootwait cfg80211.ieee80211_regdom=GB
 ```
 
 This:
-- Routes console output to TTY3 (in addition to serial, leaving TTY1 for LTC app)
-- Hides cursor
-- Reduces boot verbosity
-- Suppresses most kernel messages
+- Sets DSI panel mode with 90-degree rotation
+- Disables both HDMI outputs to avoid split or mirrored desktop behavior
+- Keeps serial console access and local console on tty1
 - **Preserves all existing critical boot parameters** (root filesystem, fsck, locale)
 
 ### 3. Disable Services for Headless Operation
@@ -75,7 +87,7 @@ This ensures the timecode reader starts automatically when the Pi boots.
 sudo reboot
 ```
 
-You should see a **black screen** on HDMI. Once the LTC reader starts (systemd service), you'll see the timecode display.
+With HDMI disabled in cmdline, output should appear on the DSI panel only. Once the LTC reader starts (systemd service), you'll see the timecode display.
 
 ## Verifying DRM/KMS Setup
 
@@ -118,6 +130,12 @@ Edit `/boot/firmware/cmdline.txt` again, appending the CPU isolation parameters:
 console=serial0,115200 console=tty3 vt.global_cursor_default=0 loglevel=3 quiet isolcpus=3 nohz_full=3 rcu_nocbs=3 root=PARTUUID=68f99be8-02 rootfstype=ext4 fsck.repair=yes rootwait cfg80211.ieee80211_regdom=GB
 ```
 
+If you keep DSI/HDMI routing flags, append CPU isolation to your active line instead:
+
+```
+video=DSI-1:480x1920M@60e,rotate=90 video=HDMI-A-1:d video=HDMI-A-2:d console=tty1 console=serial0,115200 isolcpus=3 nohz_full=3 rcu_nocbs=3 root=PARTUUID=68f99be8-02 rootfstype=ext4 fsck.repair=yes rootwait cfg80211.ieee80211_regdom=GB
+```
+
 This reserves CPU 3 for high-priority tasks (no kernel scheduler).
 
 ### Enable SCHED_FIFO in systemd service
@@ -142,11 +160,13 @@ sudo systemctl restart ltc-timecode
 ### Black screen at boot
 - Check `/dev/dri/card0` exists
 - Run `modetest -c` to enumerate modes
-- Verify HDMI cable is plugged in firmly
+- Verify DSI cable orientation and latch are correct
 - Check `dmesg` for KMS/DRM errors
 
 ### LTC timecode not updating
-- Check GPIO pin is wired and has signal
+- Verify HiFiBerry HAT is seated correctly on the 40-pin header
+- Check ALSA sees the device: `arecord -l` (should list `sndrpihifiberry` or similar)
+- Confirm input routing: `amixer sset "ADC Left Input" "{VIN1P, VIN1M}[DIFF]"` and `amixer sset ADC 0db`
 - Verify service is running: `systemctl status ltc-timecode`
 - Check logs: `journalctl -u ltc-timecode -f`
 

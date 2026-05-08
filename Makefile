@@ -1,9 +1,27 @@
 CC ?= gcc
-CFLAGS = -std=c99 -Wall -Wextra -O2 -I./include $(shell pkg-config --cflags libdrm libpng libmicrohttpd libwebsockets)
-LDFLAGS = $(shell pkg-config --libs libdrm libpng libmicrohttpd libwebsockets) -pthread
 
-# Raspberry Pi 5 native build
-# Build dependencies: sudo apt install -y build-essential libdrm-dev libpng-dev libmicrohttpd-dev libwebsockets-dev pkg-config
+# Common compile flags
+BASE_CFLAGS = -std=c99 -Wall -Wextra -O2 -I./include
+
+# Package groups (queried individually so one missing .pc doesn't hide all others)
+MAIN_PKGS = libdrm libpng ltc alsa
+CONFIG_PKGS = libdrm libpng libmicrohttpd libwebsockets
+
+# Resolve pkg-config flags package-by-package to avoid all-or-nothing failures
+MAIN_CFLAGS = $(BASE_CFLAGS) \
+	$(foreach p,$(MAIN_PKGS),$(shell pkg-config --cflags $(p) 2>/dev/null))
+MAIN_LDFLAGS = $(foreach p,$(MAIN_PKGS),$(shell pkg-config --libs $(p) 2>/dev/null)) -pthread
+
+CONFIG_CFLAGS = $(BASE_CFLAGS) \
+	$(foreach p,$(CONFIG_PKGS),$(shell pkg-config --cflags $(p) 2>/dev/null))
+CONFIG_LDFLAGS = $(foreach p,$(CONFIG_PKGS),$(shell pkg-config --libs $(p) 2>/dev/null)) -pthread
+
+# Compile-time include flags must cover all source files
+COMPILE_CFLAGS = $(BASE_CFLAGS) \
+	$(foreach p,$(MAIN_PKGS) $(CONFIG_PKGS),$(shell pkg-config --cflags $(p) 2>/dev/null))
+
+# Raspberry Pi CM5 native build
+# Build dependencies: sudo apt install -y git pkg-config build-essential xxd libdrm-dev libpng-dev libmicrohttpd-dev libwebsockets-dev libltc-dev libasound2-dev
 
 # Main timecode application source files
 MAIN_SRCS = src/main.c src/drm.c src/font.c src/ltc.c src/gpio.c src/config-management.c src/config-watcher.c
@@ -22,11 +40,11 @@ WEB_EMBEDDED = src/web-embedded.c
 all: $(MAIN_TARGET) $(CONFIG_TARGET)
 
 $(MAIN_TARGET): $(MAIN_OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(MAIN_CFLAGS) -o $@ $^ $(MAIN_LDFLAGS)
 	@echo "[BUILD] $@ complete"
 
-$(CONFIG_TARGET): $(CONFIG_OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+$(CONFIG_TARGET): $(WEB_EMBEDDED) $(CONFIG_OBJS)
+	$(CC) $(CONFIG_CFLAGS) -o $@ $(CONFIG_OBJS) $(CONFIG_LDFLAGS)
 	@echo "[BUILD] $@ complete"
 
 $(WEB_EMBEDDED): web/index.html web/styles.css web/app.js
@@ -34,7 +52,7 @@ $(WEB_EMBEDDED): web/index.html web/styles.css web/app.js
 	@bash scripts/embed-web.sh $@ .
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(COMPILE_CFLAGS) -c $< -o $@
 
 clean:
 	rm -f $(MAIN_OBJS) $(MAIN_TARGET) $(CONFIG_OBJS) $(CONFIG_TARGET) $(WEB_EMBEDDED)

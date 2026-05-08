@@ -5,16 +5,16 @@
 
 /* Hardware configuration */
 #define GPIO_LTC_PIN            17              /* BCM GPIO 17 for LTC input */
-#define TARGET_REFRESH_HZ       50              /* 50 Hz for 25fps LTC */
-#define DISPLAY_WIDTH           1920            /* 1920x1080 @ 50Hz */
-#define DISPLAY_HEIGHT          1080
+#define TARGET_REFRESH_HZ       60              /* Waveshare 8.8" DSI panel max 60 Hz */
+#define DISPLAY_WIDTH           1920            /* Landscape after cmdline rotate=90 */
+#define DISPLAY_HEIGHT          480             /* Waveshare 8.8" DSI: 480x1920 native, rotated 90° */
 
 /* Display layout */
-#define TIMECODE_X              333
-#define TIMECODE_Y              412
-#define DISPLAY_DIGIT_WIDTH     209             /* Width of each digit glyph */
+#define TIMECODE_X              80
+#define TIMECODE_Y              90
+#define DISPLAY_DIGIT_WIDTH     160             /* Width of each digit glyph at 480px height */
 #define BACKGROUND_X            (TIMECODE_X - DISPLAY_DIGIT_WIDTH)  /* Background starts 1 digit before timecode */
-#define TIMECODE_FONT_HEIGHT    300             /* Large, visible glyphs for 1920x1080 */
+#define TIMECODE_FONT_HEIGHT    300             /* Glyphs for 480px tall landscape strip */
 
 /* Colors (ARGB8888) */
 #define COLOR_BLACK             0xFF000000

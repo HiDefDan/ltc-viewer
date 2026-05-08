@@ -1,13 +1,13 @@
 # Deployment Checklist
 
-Follow these steps to deploy the LTC timecode reader to your Raspberry Pi 5.
+Follow these steps to deploy the LTC timecode reader to your Raspberry Pi CM5 setup.
 
 ## Pre-Deployment: Pi Setup
 
 - [ ] Flash Raspberry Pi OS Lite (bookworm, aarch64) to SD card
 - [ ] Boot Pi, connect via SSH
 - [ ] Update system: `sudo apt update && sudo apt upgrade -y`
-- [ ] Install build tools: `sudo apt install -y build-essential libdrm-dev`
+- [ ] Install build tools and dependencies: `sudo apt install -y git pkg-config build-essential xxd libdrm-dev libpng-dev libmicrohttpd-dev libwebsockets-dev libltc-dev libasound2-dev`
 - [ ] Set timezone: `sudo timedatectl set-timezone Europe/London`
 - [ ] Edit `/boot/firmware/config.txt` per [BOOT_CONFIG.md](BOOT_CONFIG.md)
 - [ ] Edit `/boot/firmware/cmdline.txt` per [BOOT_CONFIG.md](BOOT_CONFIG.md)
@@ -15,19 +15,20 @@ Follow these steps to deploy the LTC timecode reader to your Raspberry Pi 5.
 
 ## Hardware Setup
 
-- [ ] Wire XLR/audio input to GPIO 17 (BCM 17, Pin 11) via transformer + comparator
-  - See [README.md](README.md) "Wiring recap" and [BOOT_CONFIG.md](BOOT_CONFIG.md)
-- [ ] Verify GPIO is working: `gpio readall | grep GPIO17`
-- [ ] Connect HDMI to display (1920×1080 resolution recommended)
+- [ ] Mount CM5 on Waveshare CM5 PoE BASE A
+- [ ] Connect Waveshare 8.8" DSI display to DSI1 with 22-pin reversed FFC cable
+- [ ] Connect display power to 5V/GND header
+- [ ] Mount HiFiBerry Studio DAC+ADC and connect LTC source via XLR
+- [ ] Verify ALSA device is visible: `arecord -l`
 - [ ] Power on Pi
 
 ## Deploy Application
 
 ```bash
 # Option A: Transfer source and build on Pi (native, recommended)
-scp -r /home/admin/ltc/ pi@your-pi-ip:~/
+scp -r /home/admin/ltc-viewer/ pi@your-pi-ip:~/
 ssh pi@your-pi-ip
-cd ~/ltc
+cd ~/ltc-viewer
 make clean && make
 sudo make install
 
@@ -78,19 +79,20 @@ Check for:
 ls -la /dev/dri/
 modetest -c
 ```
-Verify HDMI connector exists and KMS driver is loaded.
+Verify DSI connector exists and KMS driver is loaded.
 
-### GPIO input not detected
+### LTC audio input not detected
 ```bash
-gpio readall
-# Check pin 11 (GPIO17) state transitions when LTC signal present
+arecord -l
+amixer sget "ADC Left Input"
+amixer sget ADC
 ```
 
 ## Configuration Customization
 
 Edit [include/config.h](include/config.h) before build:
-- Change `GPIO_LTC_PIN` if using different pin
-- Adjust `TARGET_REFRESH_HZ` for 48/50/60 Hz display
+- Adjust `TARGET_REFRESH_HZ` (default 60 for Waveshare 8.8" DSI)
+- Modify `DISPLAY_WIDTH`, `DISPLAY_HEIGHT` if display mode changes
 - Modify `TIMECODE_X`, `TIMECODE_Y` for screen position
 - Update `TZ_STRING` for your timezone
 
@@ -118,9 +120,9 @@ cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq
 
 ## Next Steps
 
-1. **Decode LTC frames**: Implement `ltc_feed_edge()` bi-phase state machine in [src/ltc.c](src/ltc.c)
+1. **Decode LTC frames**: Complete ALSA PCM -> libltc decode path in [src/ltc.c](src/ltc.c)
 2. **Font rendering**: Pre-rasterize glyphs from TrueType font and embed in [src/font.c](src/font.c)
-3. **GPIO integration**: Replace pigpio stub with actual DMA edge capture in [src/gpio.c](src/gpio.c)
+3. **Audio capture integration**: Add robust ALSA capture buffering and underrun recovery
 4. **Latency measurement**: Test with oscilloscope or high-speed camera to verify ~3–5 ms total latency
 5. **Systemd optimizations**: Enable FIFO scheduling and CPU isolation for minimal jitter
 
