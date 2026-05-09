@@ -30,6 +30,18 @@
 #define SHOW_SYSTEM_TIME        0
 
 /* LTC frame rate (24/25/30 fps) */
-#define LTC_FRAME_RATE          25
+#define LTC_FRAME_RATE          30
+
+/* LTC loss behavior */
+#define LTC_LOSS_HOLD_LAST_FRAME    0
+#define LTC_LOSS_RESTORE_TOD        1
+
+/* ALSA capture rate (used by libltc APV calculation) */
+#define ALSA_CAPTURE_RATE           48000
+
+/* RtAudio capture buffer size in frames (period).
+ * RtAudio+ALSA will round to nearest hardware-supported value.
+ * 64 frames @ 48kHz = 1.33ms per callback — well below LTC bit period. */
+#define RTAUDIO_CAPTURE_PERIOD_FRAMES 64
 
 #endif /* CONFIG_H */

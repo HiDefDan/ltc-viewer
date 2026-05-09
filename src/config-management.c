@@ -42,20 +42,20 @@ static void clamp_config_values(ltc_config_t *config) {
 
     /*
      * Keep full background pattern in bounds.
-     * Timecode is centered over 6 digits (HH.MM.SS), while background is
-     * "8.8.8.8.8.8.8.8." (8 digits) and starts one digit width to the left.
+     * Timecode is centered over 8 digits (HH.MM.SS.FF), while background is
+     * "8.8.8.8.8.8.8.8." and starts one digit width to the left.
      */
     int scaled_digit_width = (int)(DISPLAY_DIGIT_WIDTH * scale + 0.5f);
     if (scaled_digit_width < 1) {
         scaled_digit_width = 1;
     }
 
-    int scaled_timecode_width = 6 * scaled_digit_width;
+    int scaled_timecode_width = 8 * scaled_digit_width;
     int center_x = (config->display_width > scaled_timecode_width) ?
                    ((config->display_width - scaled_timecode_width) / 2) : 0;
 
     int min_text_x = scaled_digit_width;
-    int max_text_x = config->display_width - (7 * scaled_digit_width);
+    int max_text_x = config->display_width - (9 * scaled_digit_width);
 
     int max_left = center_x - min_text_x;
     int max_right = max_text_x - center_x;
@@ -88,6 +88,12 @@ void config_default(ltc_config_t *config) {
     config->bg_color_r = 0;
     config->bg_color_g = 0;
     config->bg_color_b = 0;
+
+    config->dsi_ltc_loss_behavior = LTC_LOSS_RESTORE_TOD;
+    config->dsi_ltc_loss_timeout_sec = 3;
+    config->hdmi_ltc_loss_behavior = LTC_LOSS_RESTORE_TOD;
+    config->hdmi_ltc_loss_timeout_sec = 3;
+    config->debug_overlay_enabled = 0;
     
     /* Network defaults */
     config->admin_vlan_enabled = 0;
@@ -139,6 +145,23 @@ static int json_extract_int(const char *json, const char *key, int *value) {
     return 0;
 }
 
+static void clamp_ltc_loss_behavior(ltc_config_t *config) {
+    if (config->dsi_ltc_loss_behavior != LTC_LOSS_HOLD_LAST_FRAME &&
+        config->dsi_ltc_loss_behavior != LTC_LOSS_RESTORE_TOD) {
+        config->dsi_ltc_loss_behavior = LTC_LOSS_HOLD_LAST_FRAME;
+    }
+    if (config->hdmi_ltc_loss_behavior != LTC_LOSS_HOLD_LAST_FRAME &&
+        config->hdmi_ltc_loss_behavior != LTC_LOSS_RESTORE_TOD) {
+        config->hdmi_ltc_loss_behavior = LTC_LOSS_RESTORE_TOD;
+    }
+    if (config->dsi_ltc_loss_timeout_sec < 0) {
+        config->dsi_ltc_loss_timeout_sec = 0;
+    }
+    if (config->hdmi_ltc_loss_timeout_sec < 0) {
+        config->hdmi_ltc_loss_timeout_sec = 0;
+    }
+}
+
 // Simple JSON float extraction helper
 static int json_extract_float(const char *json, const char *key, float *value) {
     char search_pattern[512];
@@ -186,6 +209,12 @@ int config_from_json(const char *json_str, ltc_config_t *config) {
     json_extract_int(json_str, "bg_color_r", &config->bg_color_r);
     json_extract_int(json_str, "bg_color_g", &config->bg_color_g);
     json_extract_int(json_str, "bg_color_b", &config->bg_color_b);
+
+    json_extract_int(json_str, "dsi_ltc_loss_behavior", &config->dsi_ltc_loss_behavior);
+    json_extract_int(json_str, "dsi_ltc_loss_timeout_sec", &config->dsi_ltc_loss_timeout_sec);
+    json_extract_int(json_str, "hdmi_ltc_loss_behavior", &config->hdmi_ltc_loss_behavior);
+    json_extract_int(json_str, "hdmi_ltc_loss_timeout_sec", &config->hdmi_ltc_loss_timeout_sec);
+    json_extract_int(json_str, "debug_overlay_enabled", &config->debug_overlay_enabled);
     
     /* Network settings */
     json_extract_int(json_str, "admin_vlan_enabled", &config->admin_vlan_enabled);
@@ -195,15 +224,16 @@ int config_from_json(const char *json_str, ltc_config_t *config) {
     json_extract_int(json_str, "web_ui_bind_port", &config->web_ui_bind_port);
 
     clamp_config_values(config);
+    clamp_ltc_loss_behavior(config);
     
     return 0;
 }
 
 char* config_to_json(const ltc_config_t *config) {
-    char *json = malloc(3072);
+    char *json = malloc(4096);
     if (!json) return NULL;
     
-    snprintf(json, 3072,
+    snprintf(json, 4096,
         "{\n"
         "  \"timezone\": \"%s\",\n"
         "  \"ntp_server\": \"%s\",\n"
@@ -219,6 +249,11 @@ char* config_to_json(const ltc_config_t *config) {
         "  \"bg_color_r\": %d,\n"
         "  \"bg_color_g\": %d,\n"
         "  \"bg_color_b\": %d,\n"
+        "  \"dsi_ltc_loss_behavior\": %d,\n"
+        "  \"dsi_ltc_loss_timeout_sec\": %d,\n"
+        "  \"hdmi_ltc_loss_behavior\": %d,\n"
+        "  \"hdmi_ltc_loss_timeout_sec\": %d,\n"
+        "  \"debug_overlay_enabled\": %d,\n"
         "  \"admin_vlan_enabled\": %d,\n"
         "  \"admin_vlan_ip\": \"%s\",\n"
         "  \"admin_vlan_gateway\": \"%s\",\n"
@@ -239,6 +274,11 @@ char* config_to_json(const ltc_config_t *config) {
         config->bg_color_r,
         config->bg_color_g,
         config->bg_color_b,
+        config->dsi_ltc_loss_behavior,
+        config->dsi_ltc_loss_timeout_sec,
+        config->hdmi_ltc_loss_behavior,
+        config->hdmi_ltc_loss_timeout_sec,
+        config->debug_overlay_enabled,
         config->admin_vlan_enabled,
         config->admin_vlan_ip,
         config->admin_vlan_gateway,
@@ -297,6 +337,7 @@ int config_load(const char *path, ltc_config_t *config) {
 
     if (ret == 0) {
         clamp_config_values(config);
+        clamp_ltc_loss_behavior(config);
     }
     
     free(json);

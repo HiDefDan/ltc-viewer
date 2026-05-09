@@ -9,6 +9,7 @@ User=root
 ExecStart=/usr/local/bin/ltc-timecode
 Restart=on-failure
 RestartSec=10
+TimeoutStopSec=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ltc-timecode

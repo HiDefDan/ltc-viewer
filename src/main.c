@@ -9,16 +9,96 @@
 #include <sched.h>
 #include <sys/mman.h>
 #include <math.h>
+#include <pthread.h>
+#include <rtaudio/rtaudio_c.h>
 
 #include "drm.h"
 #include "font.h"
 #include "ltc-timecode.h"
-#include "gpio.h"
 #include "config.h"
 #include "config-management.h"
 #include "config-watcher.h"
 
 static volatile int should_exit = 0;
+static ltc_drm_context_t g_drm;
+
+/* Shared state written by capture thread, read by main thread.
+ * Protected by a mutex that is held only for a memcpy — never during DRM renders
+ * or libltc decode, so the capture thread never blocks for more than ~1us. */
+typedef struct {
+    ltc_frame_t frame;
+    int         fresh;      /* 1 = new frame since last main-thread read */
+    time_t      last_seen;
+    uint64_t    frame_mono_ns;
+} ltc_shared_t;
+
+typedef struct {
+    rtaudio_t       rta;
+    ltc_decoder_t  *decoder;
+    ltc_shared_t   *shared;
+    pthread_mutex_t *shared_mutex;
+} rtaudio_ctx_t;
+
+/* RtAudio input callback — runs in RtAudio's internal callback thread.
+ * Receives SINT16 mono frames directly from HiFiBerry ADC.
+ * No bit-shifting or channel extraction: RtAudio opens the device as
+ * 1-channel S16_LE so samples arrive ready to feed straight to libltc. */
+static int ltc_rtaudio_callback(void *out, void *in, unsigned int nframes,
+                                double stream_time, rtaudio_stream_status_t status,
+                                void *userdata)
+{
+    (void)out; (void)stream_time; (void)status;
+    rtaudio_ctx_t *ctx = (rtaudio_ctx_t *)userdata;
+    if (!in || nframes == 0) return 0;
+    const int16_t *pcm = (const int16_t *)in;
+
+    /* Feed and decode outside the shared mutex — decoder is only ever
+     * touched from this single callback thread. */
+    ltc_feed_audio(ctx->decoder, pcm, nframes, 1);
+
+    ltc_frame_t decoded;
+    while (ltc_get_frame(ctx->decoder, &decoded) == 0) {
+        struct timespec ts_now;
+        clock_gettime(CLOCK_MONOTONIC, &ts_now);
+        uint64_t mono_ns = (uint64_t)ts_now.tv_sec * 1000000000ULL + (uint64_t)ts_now.tv_nsec;
+
+        /* Mutex held only for the tiny shared-result copy (~<1 µs). */
+        pthread_mutex_lock(ctx->shared_mutex);
+        ctx->shared->frame     = decoded;
+        ctx->shared->fresh     = 1;
+        ctx->shared->last_seen = time(NULL);
+        ctx->shared->frame_mono_ns = mono_ns;
+        pthread_mutex_unlock(ctx->shared_mutex);
+    }
+    return 0;
+}
+
+/* Enumerate RtAudio ALSA devices and return the HiFiBerry input id.
+ * Falls back to the ALSA default input if not found by name. */
+static unsigned int rta_find_hifiberry_input(rtaudio_t rta)
+{
+    int ndev = rtaudio_device_count(rta);
+    unsigned int fallback = 0;
+    for (int i = 0; i < ndev; i++) {
+        unsigned int did = rtaudio_get_device_id(rta, i);
+        rtaudio_device_info_t info = rtaudio_get_device_info(rta, did);
+        if (info.input_channels == 0) continue;
+        /* Match the ALSA card-id fragment present in both pre- and post-reboot
+         * card numbering (sndrpihifiberry / HiFiBerry). */
+        if (strstr(info.name, "hifiberry") || strstr(info.name, "HiFiBerry") ||
+            strstr(info.name, "sndrpi")) {
+            printf("[RTA] HiFiBerry input: %s (id=%u, %u ch)\n",
+                   info.name, did, info.input_channels);
+            return did;
+        }
+        if (fallback == 0) fallback = did;
+    }
+    unsigned int def = rtaudio_get_default_input_device(rta);
+    printf("[RTA] Using default input device id=%u\n", def ? def : fallback);
+    return def ? def : fallback;
+}
+
+
 
 /*
  * Rotate a landscape ARGB8888 image (src_w x src_h) into a portrait
@@ -43,6 +123,80 @@ static void rotate_argb8888_90ccw(const uint8_t *src,
             dst32[dy * dst_stride + dx] = pixel;
         }
     }
+}
+
+/* Draw a tiny lowercase-style "df" badge using only the period glyph.
+ * This keeps the overlay within the existing glyph set (digits + period). */
+static void draw_df_badge(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
+                          uint32_t x, uint32_t y, uint32_t color, float dot_scale)
+{
+    static const int d_pts[][2] = {
+        {1,0},{2,0},
+        {2,1},
+        {1,2},{2,2},
+        {1,3},{2,3},
+        {1,4},{2,4}
+    };
+    static const int f_pts[][2] = {
+        {0,0},{1,0},{2,0},
+        {0,1},
+        {0,2},{1,2},
+        {0,3},
+        {0,4}
+    };
+
+    uint32_t step = (uint32_t)(18.0f * dot_scale + 0.5f);
+    if (step < 2) {
+        step = 2;
+    }
+
+    for (size_t i = 0; i < sizeof(d_pts)/sizeof(d_pts[0]); i++) {
+        uint32_t px = x + (uint32_t)d_pts[i][0] * step;
+        uint32_t py = y + (uint32_t)d_pts[i][1] * step;
+        font_blit_string_scaled(fb, fb_width, fb_height, fb_pitch, px, py, ".", color, dot_scale);
+    }
+
+    uint32_t fx0 = x + 4 * step;
+    for (size_t i = 0; i < sizeof(f_pts)/sizeof(f_pts[0]); i++) {
+        uint32_t px = fx0 + (uint32_t)f_pts[i][0] * step;
+        uint32_t py = y + (uint32_t)f_pts[i][1] * step;
+        font_blit_string_scaled(fb, fb_width, fb_height, fb_pitch, px, py, ".", color, dot_scale);
+    }
+}
+
+static uint32_t tc_index_24h(const ltc_frame_t *f, uint32_t fps)
+{
+    uint32_t sec_of_day = f->hours * 3600u + f->minutes * 60u + f->seconds;
+    return sec_of_day * fps + (f->frame % fps);
+}
+
+static int32_t tc_signed_delta(const ltc_frame_t *from, const ltc_frame_t *to, uint32_t fps)
+{
+    uint32_t day_frames = 24u * 3600u * fps;
+    uint32_t fi = tc_index_24h(from, fps);
+    uint32_t ti = tc_index_24h(to, fps);
+    uint32_t forward = (ti + day_frames - fi) % day_frames;
+    uint32_t backward = (fi + day_frames - ti) % day_frames;
+    return (forward <= backward) ? (int32_t)forward : -(int32_t)backward;
+}
+
+static ltc_frame_t tc_add_steps(const ltc_frame_t *f, uint32_t fps, uint32_t steps)
+{
+    ltc_frame_t out = *f;
+    if (fps == 0) {
+        return out;
+    }
+
+    uint32_t day_frames = 24u * 3600u * fps;
+    uint32_t idx = tc_index_24h(f, fps);
+    idx = (idx + steps) % day_frames;
+
+    uint32_t sec_of_day = idx / fps;
+    out.frame = idx % fps;
+    out.hours = (sec_of_day / 3600u) % 24u;
+    out.minutes = (sec_of_day / 60u) % 60u;
+    out.seconds = sec_of_day % 60u;
+    return out;
 }
 
 void signal_handler(int sig) {
@@ -99,25 +253,24 @@ int main(int argc, char *argv[]) {
             current_config.display_width, current_config.display_height, current_config.refresh_hz);
 
     /* Initialize DRM for framebuffer rendering with config refresh rate */
-    ltc_drm_context_t drm = {0};
     float target_hz = (current_config.refresh_hz > 0.0f) ? current_config.refresh_hz : (float)TARGET_REFRESH_HZ;
-    if (drm_init(&drm, (uint32_t)current_config.display_width, (uint32_t)current_config.display_height, target_hz)) {
+    if (drm_init(&g_drm, (uint32_t)current_config.display_width, (uint32_t)current_config.display_height, target_hz)) {
         fprintf(stderr, "Failed to initialize DRM\n");
         return EXIT_FAILURE;
     }
 
     clock_gettime(CLOCK_BOOTTIME, &ts);
-    printf("[MAIN] DRM initialized: %.2f Hz (boot+%.3f s)\n", drm.mode_refresh_hz, ts.tv_sec + ts.tv_nsec/1e9);
+    printf("[MAIN] DRM initialized: %.2f Hz (boot+%.3f s)\n", g_drm.mode_refresh_hz, ts.tv_sec + ts.tv_nsec/1e9);
 
     /* Update current_config to reflect what DRM actually selected */
-    current_config.display_width = drm.front.hdisplay;
-    current_config.display_height = drm.front.vdisplay;
-    current_config.refresh_hz = drm.mode_refresh_hz;
+    current_config.display_width = g_drm.front.hdisplay;
+    current_config.display_height = g_drm.front.vdisplay;
+    current_config.refresh_hz = g_drm.mode_refresh_hz;
 
     /* Initialize bitmap font */
     if (font_init()) {
         fprintf(stderr, "Failed to initialize font\n");
-        drm_cleanup(&drm);
+        drm_cleanup(&g_drm);
         return EXIT_FAILURE;
     }
 
@@ -132,7 +285,7 @@ int main(int argc, char *argv[]) {
     ltc_decoder_t ltc = {0};
     if (ltc_decoder_init(&ltc, LTC_FRAME_RATE)) {
         fprintf(stderr, "Failed to initialize LTC decoder\n");
-        drm_cleanup(&drm);
+        drm_cleanup(&g_drm);
         return EXIT_FAILURE;
     }
 
@@ -140,17 +293,70 @@ int main(int argc, char *argv[]) {
     printf("[MAIN] LTC decoder initialized for %u fps (boot+%.3f s)\n", LTC_FRAME_RATE, ts.tv_sec + ts.tv_nsec/1e9);
     fflush(stdout);
 
-    /* Initialize GPIO for LTC edge capture */
-    gpio_context_t gpio = {0};
-    if (gpio_init(&gpio, GPIO_LTC_PIN)) {
-        fprintf(stderr, "Failed to initialize GPIO\n");
-        drm_cleanup(&drm);
+    pthread_mutex_t ltc_mutex;
+    ltc_shared_t ltc_shared = {0};
+    if (pthread_mutex_init(&ltc_mutex, NULL) != 0) {
+        fprintf(stderr, "Failed to initialize LTC mutex\n");
+        ltc_decoder_cleanup(&ltc);
+        drm_cleanup(&g_drm);
         return EXIT_FAILURE;
     }
 
+    rtaudio_ctx_t rtactx;
+    memset(&rtactx, 0, sizeof(rtactx));
+    rtactx.decoder      = &ltc;
+    rtactx.shared       = &ltc_shared;
+    rtactx.shared_mutex = &ltc_mutex;
+
+    rtactx.rta = rtaudio_create(RTAUDIO_API_LINUX_ALSA);
+    if (!rtactx.rta) {
+        fprintf(stderr, "[RTA] Failed to create RtAudio ALSA instance\n");
+        pthread_mutex_destroy(&ltc_mutex);
+        ltc_decoder_cleanup(&ltc);
+        drm_cleanup(&g_drm);
+        return EXIT_FAILURE;
+    }
+
+    unsigned int rta_dev = rta_find_hifiberry_input(rtactx.rta);
+
+    rtaudio_stream_parameters_t rta_in;
+    memset(&rta_in, 0, sizeof(rta_in));
+    rta_in.device_id     = rta_dev;
+    rta_in.num_channels  = 1;   /* mono — RtAudio extracts channel 0 from hardware */
+    rta_in.first_channel = 0;
+
+    unsigned int rta_buf = RTAUDIO_CAPTURE_PERIOD_FRAMES;
+
+    rtaudio_stream_options_t rta_opts;
+    memset(&rta_opts, 0, sizeof(rta_opts));
+    rta_opts.flags       = RTAUDIO_FLAGS_MINIMIZE_LATENCY | RTAUDIO_FLAGS_SCHEDULE_REALTIME;
+    rta_opts.num_buffers = 4;
+    rta_opts.priority    = 80;
+    strncpy(rta_opts.name, "ltc-timecode", sizeof(rta_opts.name) - 1);
+
+    int rta_rc = rtaudio_open_stream(rtactx.rta,
+                                     NULL, &rta_in,
+                                     RTAUDIO_FORMAT_SINT16,
+                                     ALSA_CAPTURE_RATE,
+                                     &rta_buf,
+                                     ltc_rtaudio_callback,
+                                     &rtactx,
+                                     &rta_opts,
+                                     NULL);
+    if (rta_rc != RTAUDIO_ERROR_NONE) {
+        fprintf(stderr, "[RTA] Open stream failed: %s\n", rtaudio_error(rtactx.rta));
+        rtaudio_destroy(rtactx.rta);
+        pthread_mutex_destroy(&ltc_mutex);
+        ltc_decoder_cleanup(&ltc);
+        drm_cleanup(&g_drm);
+        return EXIT_FAILURE;
+    }
+    rtaudio_start_stream(rtactx.rta);
+
     clock_gettime(CLOCK_BOOTTIME, &ts);
     fflush(stdout);
-    printf("[MAIN] GPIO initialized on BCM%d (boot+%.3f s)\n", GPIO_LTC_PIN, ts.tv_sec + ts.tv_nsec/1e9);
+    printf("[RTA] Capture started: device=%u buf=%u frames S16 mono 48kHz (boot+%.3f s)\n",
+           rta_dev, rta_buf, ts.tv_sec + ts.tv_nsec/1e9);
 
     /* Main render loop */
     uint64_t frame_count = 0;
@@ -164,6 +370,17 @@ int main(int argc, char *argv[]) {
     uint64_t render_op_count = 0;   /* renders performed in current 5-s window */
     uint64_t skip_count = 0;        /* frames skipped (identical timecode) */
     uint64_t total_render_ns = 0;   /* accumulated render time (ns) */
+    uint64_t total_latency_ms = 0;  /* accumulated decode->display latency (ms) */
+    uint64_t latency_samples = 0;   /* latency samples in current 5-s window */
+    ltc_frame_t last_ltc_frame = {0};
+    ltc_frame_t target_ltc_frame = {0};
+    uint64_t target_ltc_mono_ns = 0;
+    int has_ltc_frame = 0;
+    int has_target_ltc_frame = 0;
+    time_t last_ltc_seen = 0;
+    struct timespec last_smooth_ts = {0};
+    int smooth_clock_init = 0;
+    double smooth_budget_frames = 0.0;
 
     clock_gettime(CLOCK_BOOTTIME, &ts);
     fflush(stdout);
@@ -186,16 +403,16 @@ int main(int argc, char *argv[]) {
                           current_config.display_width, current_config.display_height, current_config.refresh_hz,
                           new_config.display_width, new_config.display_height, new_config.refresh_hz);
                     fflush(stdout);
-                    drm_cleanup(&drm);
+                                        drm_cleanup(&g_drm);
                     float new_target_hz = new_config.refresh_hz;
-                      if (drm_init(&drm, (uint32_t)new_config.display_width, (uint32_t)new_config.display_height, new_target_hz) == 0) {
+                                            if (drm_init(&g_drm, (uint32_t)new_config.display_width, (uint32_t)new_config.display_height, new_target_hz) == 0) {
                        printf("[MAIN] DRM reinitialized successfully: %ux%u @ %.2f Hz\n",
-                           drm.front.hdisplay, drm.front.vdisplay, drm.mode_refresh_hz);
+                                                     g_drm.front.hdisplay, g_drm.front.vdisplay, g_drm.mode_refresh_hz);
                         fflush(stdout);
                         /* Update new_config to reflect what DRM actually selected */
-                        new_config.display_width = drm.front.hdisplay;
-                        new_config.display_height = drm.front.vdisplay;
-                        new_config.refresh_hz = drm.mode_refresh_hz;
+                                                new_config.display_width = g_drm.front.hdisplay;
+                                                new_config.display_height = g_drm.front.vdisplay;
+                                                new_config.refresh_hz = g_drm.mode_refresh_hz;
                     } else {
                        fprintf(stderr, "[MAIN] Failed to reinitialize DRM with %dx%d@%.2f, exiting\n",
                             new_config.display_width, new_config.display_height, new_config.refresh_hz);
@@ -213,22 +430,15 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* Poll GPIO for edge (non-blocking stub) */
-        uint64_t edge_time = 0;
-        int level = 0;
-        if (gpio_wait_edge(&gpio, &edge_time, &level) == 0 && edge_time > 0) {
-            ltc_feed_edge(&ltc, edge_time, level);
-        }
-
         /* Get back buffer and render */
-        uint8_t *back_buffer = drm_get_back_buffer(&drm);
+        uint8_t *back_buffer = drm_get_back_buffer(&g_drm);
         if (!back_buffer) {
             fprintf(stderr, "Failed to get back buffer\n");
             break;
         }
 
-        uint32_t fb_width = drm.back.hdisplay;
-        uint32_t fb_height = drm.back.vdisplay;
+        uint32_t fb_width = g_drm.back.hdisplay;
+        uint32_t fb_height = g_drm.back.vdisplay;
         int portrait_mode = (fb_height > fb_width);
 
         /*
@@ -237,7 +447,7 @@ int main(int argc, char *argv[]) {
          */
         uint32_t render_width = portrait_mode ? fb_height : fb_width;
         uint32_t render_height = portrait_mode ? fb_width : fb_height;
-        uint32_t render_pitch = portrait_mode ? (render_width * 4) : drm.back.pitch;
+        uint32_t render_pitch = portrait_mode ? (render_width * 4) : g_drm.back.pitch;
 
         uint8_t *render_buffer = back_buffer;
         if (portrait_mode) {
@@ -292,13 +502,113 @@ int main(int argc, char *argv[]) {
         char timecode_str[32];
         struct tm *tm_local = localtime(&now);
 
-        /* Try to get LTC frame; fall back to system time */
-        ltc_frame_t ltc_frame = {0};
-        if (SHOW_SYSTEM_TIME || ltc_get_frame(&ltc, &ltc_frame) != 0) {
-            ltc_frame_to_string_with_tz(&ltc_frame, tm_local, timecode_str, sizeof(timecode_str));
-        } else {
-            ltc_frame_to_string(&ltc_frame, timecode_str, sizeof(timecode_str));
+        /* Decode selection:
+         * 1) Show LTC immediately when a frame is available.
+         * 2) On LTC loss, either hold last frame or restore ToD after timeout.
+         */
+        /* Collect LTC frame decoded by capture thread. Mutex held < 1us. */
+        ltc_frame_t live_ltc_frame = {0};
+        uint64_t live_ltc_mono_ns = 0;
+        int got_ltc = 0;
+        pthread_mutex_lock(&ltc_mutex);
+        if (ltc_shared.fresh) {
+            live_ltc_frame = ltc_shared.frame;
+            live_ltc_mono_ns = ltc_shared.frame_mono_ns;
+            ltc_shared.fresh = 0;
+            got_ltc = 1;
         }
+        pthread_mutex_unlock(&ltc_mutex);
+
+        float detected_ltc_fps = ltc_get_detected_fps(&ltc); /* benign race for UI */
+        uint32_t nominal_ltc_fps = ltc_get_nominal_fps(&ltc); /* benign race for UI */
+        uint64_t ltc_gap_count = ltc_get_gap_count(&ltc); /* benign race for UI */
+
+        if (got_ltc) {
+            has_ltc_frame = 1;
+            last_ltc_seen = now;
+            target_ltc_frame = live_ltc_frame;
+            target_ltc_mono_ns = live_ltc_mono_ns;
+            has_target_ltc_frame = 1;
+            if (!smooth_clock_init) {
+                clock_gettime(CLOCK_MONOTONIC, &last_smooth_ts);
+                smooth_clock_init = 1;
+            }
+            if (last_ltc_frame.hours == 0 && last_ltc_frame.minutes == 0 &&
+                last_ltc_frame.seconds == 0 && last_ltc_frame.frame == 0) {
+                last_ltc_frame = target_ltc_frame;
+            }
+        }
+
+        if (has_ltc_frame) {
+            time_t loss_age = now - last_ltc_seen;
+            if (loss_age >= current_config.dsi_ltc_loss_timeout_sec) {
+                /* No fresh LTC for timeout window: force non-live state so
+                 * display returns to ToD/green instead of holding stale frame. */
+                has_ltc_frame = 0;
+                has_target_ltc_frame = 0;
+                target_ltc_mono_ns = 0;
+                smooth_budget_frames = 0.0;
+                ltc_frame_to_string_with_tz(&last_ltc_frame, tm_local, timecode_str, sizeof(timecode_str));
+            } else {
+                if (has_target_ltc_frame && got_ltc) {
+                    uint32_t fps_for_smooth = nominal_ltc_fps ? nominal_ltc_fps : LTC_FRAME_RATE;
+                    int32_t delta = tc_signed_delta(&last_ltc_frame, &target_ltc_frame, fps_for_smooth);
+
+                    if (!smooth_clock_init) {
+                        clock_gettime(CLOCK_MONOTONIC, &last_smooth_ts);
+                        smooth_clock_init = 1;
+                    }
+
+                    struct timespec now_smooth_ts;
+                    clock_gettime(CLOCK_MONOTONIC, &now_smooth_ts);
+                    double elapsed_s = (double)(now_smooth_ts.tv_sec - last_smooth_ts.tv_sec)
+                                     + (double)(now_smooth_ts.tv_nsec - last_smooth_ts.tv_nsec) / 1e9;
+                    if (elapsed_s < 0.0) {
+                        elapsed_s = 0.0;
+                    }
+                    if (elapsed_s > 0.25) {
+                        elapsed_s = 0.25;
+                    }
+                    last_smooth_ts = now_smooth_ts;
+
+                    /* Advance strictly by elapsed real time so displayed LTC
+                     * cannot run faster than source cadence. */
+                    smooth_budget_frames += elapsed_s * (double)fps_for_smooth;
+
+                    /* Keep only a tiny reserve to avoid bursty catch-up. */
+                    double max_budget = 2.0;
+                    if (smooth_budget_frames > max_budget) {
+                        smooth_budget_frames = max_budget;
+                    }
+
+                    uint32_t allowed_steps = (uint32_t)smooth_budget_frames;
+                    uint32_t abs_delta = (delta >= 0) ? (uint32_t)delta : (uint32_t)(-delta);
+
+                    /* Snap on backward/large discontinuities (loop boundaries, seeks,
+                     * bad jumps) so smoothing never wraps forward through hours. */
+                    if (delta < 0 || abs_delta > (fps_for_smooth * 2u)) {
+                        last_ltc_frame = target_ltc_frame;
+                        smooth_budget_frames = 0.0;
+                    } else if (delta > 0) {
+                        if (allowed_steps > 0) {
+                            uint32_t step = (abs_delta < allowed_steps) ? abs_delta : allowed_steps;
+                            last_ltc_frame = tc_add_steps(&last_ltc_frame, fps_for_smooth, step);
+                            last_ltc_frame.drop_frame = target_ltc_frame.drop_frame;
+                            smooth_budget_frames -= (double)step;
+                        }
+                    } else if (smooth_budget_frames > 1.0) {
+                        /* Prevent budget buildup while already in sync. */
+                        smooth_budget_frames = 1.0;
+                    }
+                }
+                ltc_frame_to_string(&last_ltc_frame, timecode_str, sizeof(timecode_str));
+            }
+        } else {
+            ltc_frame_to_string_with_tz(&last_ltc_frame, tm_local, timecode_str, sizeof(timecode_str));
+        }
+
+        /* Consider LTC live for one second after the latest decoded frame. */
+        int ltc_live = has_ltc_frame && ((now - last_ltc_seen) <= 1);
 
         /* Option A: skip render and flip entirely when timecode is unchanged */
         int need_render = (strcmp(timecode_str, prev_timecode_str) != 0);
@@ -385,13 +695,59 @@ int main(int argc, char *argv[]) {
             /* Render timecode */
             uint32_t text_x = (uint32_t)text_x_final;
             uint32_t text_y = (uint32_t)text_y_final;
-            uint32_t text_color = ((current_config.color_r << 16) |
-                                   (current_config.color_g << 8) |
-                                   (current_config.color_b));
+            uint32_t text_color;
+            if (ltc_live) {
+                /* Live incoming LTC is always shown in red for at-a-glance status. */
+                text_color = 0x00FF0000;
+            } else {
+                text_color = ((current_config.color_r << 16) |
+                              (current_config.color_g << 8) |
+                              (current_config.color_b));
+            }
 
             font_blit_string_scaled(render_buffer, render_width, render_height, render_pitch,
                         text_x, text_y, timecode_str,
                         text_color, glyph_scale);
+
+            if (current_config.debug_overlay_enabled) {
+                /* Compact overlay: measured_fps.nominal_fps.expected_fps.gap_mod_100
+                 * Example: 23.98.24.30.03
+                 * If nominal != expected, color shifts to orange to call out rate mismatch. */
+                int fps_int = (int)detected_ltc_fps;
+                int fps_frac = (int)llround((detected_ltc_fps - (float)fps_int) * 100.0f);
+                if (fps_frac < 0) {
+                    fps_frac = 0;
+                }
+                if (fps_frac > 99) {
+                    fps_frac = 99;
+                }
+
+                char overlay_str[32];
+                unsigned int df_flag = (ltc_live && last_ltc_frame.drop_frame) ? 1u : 0u;
+                unsigned int gap_mod = (unsigned int)(ltc_gap_count % 100u);
+                unsigned int expected_fps = LTC_FRAME_RATE;
+                snprintf(overlay_str, sizeof(overlay_str), "%02d.%02d.%02u.%02u.%02u",
+                         fps_int, fps_frac, nominal_ltc_fps, expected_fps, gap_mod);
+
+                float overlay_scale = glyph_scale * 0.23f;
+                if (overlay_scale < 0.08f) {
+                    overlay_scale = 0.08f;
+                }
+                uint32_t overlay_x = 12;
+                uint32_t overlay_y = 12;
+                uint32_t overlay_color = (nominal_ltc_fps != 0 && nominal_ltc_fps != expected_fps)
+                    ? 0x00FF8800 : 0x00FFFF00;
+                font_blit_string_scaled(render_buffer, render_width, render_height, render_pitch,
+                                        overlay_x, overlay_y, overlay_str,
+                                        overlay_color, overlay_scale);
+
+                if (df_flag) {
+                    uint32_t df_x = overlay_x + (uint32_t)(16.0f * DISPLAY_DIGIT_WIDTH * overlay_scale);
+                    draw_df_badge(render_buffer, render_width, render_height, render_pitch,
+                                  df_x, overlay_y,
+                                  overlay_color, overlay_scale * 0.72f);
+                }
+            }
 
             if (portrait_mode) {
                 rotate_argb8888_90ccw(render_buffer,
@@ -399,13 +755,21 @@ int main(int argc, char *argv[]) {
                                       render_height,
                                       render_pitch,
                                       back_buffer,
-                                      drm.back.pitch);
+                                      g_drm.back.pitch);
             }
 
             clock_gettime(CLOCK_MONOTONIC, &t_render_end);
             total_render_ns += (uint64_t)(t_render_end.tv_sec - t_render_start.tv_sec) * 1000000000ULL
                              + (uint64_t)(t_render_end.tv_nsec - t_render_start.tv_nsec);
             render_op_count++;
+
+            if (ltc_live && target_ltc_mono_ns > 0) {
+                uint64_t now_mono_ns = (uint64_t)t_render_end.tv_sec * 1000000000ULL + (uint64_t)t_render_end.tv_nsec;
+                if (now_mono_ns >= target_ltc_mono_ns) {
+                    total_latency_ms += (now_mono_ns - target_ltc_mono_ns) / 1000000ULL;
+                    latency_samples++;
+                }
+            }
 
             /* Page flip (vblank-synced) */
             static int first_frame = 1;
@@ -416,7 +780,7 @@ int main(int argc, char *argv[]) {
                 first_frame = 0;
             }
 
-            if (drm_page_flip_sync(&drm)) {
+            if (drm_page_flip_sync(&g_drm)) {
                 fprintf(stderr, "[MAIN] Page flip failed\n");
                 fflush(stderr);
                 break;
@@ -428,19 +792,23 @@ int main(int argc, char *argv[]) {
         frame_count++;
 
         /* Log status every ~5 seconds */
-        if ((frame_count % (5 * drm.mode_vrefresh)) == 0) {
+        if ((frame_count % (5 * g_drm.mode_vrefresh)) == 0) {
             uint64_t avg_us = render_op_count > 0
                 ? total_render_ns / render_op_count / 1000 : 0;
+            uint64_t avg_latency_ms = latency_samples > 0
+                ? total_latency_ms / latency_samples : 0;
             printf("[MAIN] Frame %" PRIu64 ", TC: %s | rendered=%" PRIu64
-                   " skipped=%" PRIu64 " avg_render=%" PRIu64 "us\n",
-                   frame_count, timecode_str, render_op_count, skip_count, avg_us);
+                   " skipped=%" PRIu64 " avg_render=%" PRIu64 "us ltc_fps=%.2f disp_lat=%" PRIu64 "ms\n",
+                   frame_count, timecode_str, render_op_count, skip_count, avg_us, detected_ltc_fps, avg_latency_ms);
             fflush(stdout);
             render_op_count = 0;
             skip_count = 0;
             total_render_ns = 0;
+            total_latency_ms = 0;
+            latency_samples = 0;
         }
 
-        /* Yield CPU briefly to allow GPIO edges to be captured */
+        /* Yield CPU briefly */
         struct timespec ts = {0, 100000};  /* 100 µs */
         nanosleep(&ts, NULL);
     }
@@ -448,10 +816,18 @@ int main(int argc, char *argv[]) {
     printf("[MAIN] Shutting down...\n");
 
     /* Cleanup */
+    if (rtactx.rta) {
+        if (rtaudio_is_stream_running(rtactx.rta))
+            rtaudio_abort_stream(rtactx.rta);
+        if (rtaudio_is_stream_open(rtactx.rta))
+            rtaudio_close_stream(rtactx.rta);
+        rtaudio_destroy(rtactx.rta);
+    }
+    pthread_mutex_destroy(&ltc_mutex);
+    ltc_decoder_cleanup(&ltc);
     free(staging_buffer);
     config_watcher_cleanup(&config_watcher);
-    gpio_cleanup(&gpio);
-    drm_cleanup(&drm);
+    drm_cleanup(&g_drm);
 
     printf("[MAIN] Cleanup complete. Exiting.\n");
     return EXIT_SUCCESS;

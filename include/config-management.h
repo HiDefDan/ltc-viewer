@@ -18,6 +18,15 @@ typedef struct {
     int bg_color_r;               // Background red
     int bg_color_g;               // Background green
     int bg_color_b;               // Background blue
+
+    // LTC loss behavior per display
+    // 0: hold last frame indefinitely
+    // 1: restore system time after timeout
+    int dsi_ltc_loss_behavior;
+    int dsi_ltc_loss_timeout_sec;
+    int hdmi_ltc_loss_behavior;
+    int hdmi_ltc_loss_timeout_sec;
+    int debug_overlay_enabled;      // 1 to show compact on-screen debug metrics
     
     // Network settings
     int admin_vlan_enabled;       // Enable VLAN 1 for admin access

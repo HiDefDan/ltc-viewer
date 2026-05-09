@@ -19,3 +19,6 @@ src/web-embedded.c
 
 # Local archived docs
 .archive/
+
+# local test files
+test/

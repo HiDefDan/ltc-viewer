@@ -210,6 +210,7 @@ int drm_init(ltc_drm_context_t *ctx, uint32_t target_width, uint32_t target_heig
     printf("[DRM] drm_init called with target=%ux%u@%.2f\n", target_width, target_height, target_vrefresh);
     fflush(stdout);
     memset(ctx, 0, sizeof(*ctx));
+    ctx->fd = -1;
 
     /* Open DRM device - try /dev/dri/card0, card1, etc. with resource validation */
     for (int i = 0; i < 16; i++) {
@@ -397,6 +398,10 @@ uint8_t *drm_get_back_buffer(ltc_drm_context_t *ctx) {
 
 int drm_page_flip_sync(ltc_drm_context_t *ctx) {
     /* Page flip: update CRTC with new framebuffer using stored mode */
+    if (!ctx || ctx->fd < 0) {
+        fprintf(stderr, "[DRM] Page flip: invalid DRM context or fd=%d\n", ctx ? ctx->fd : -9999);
+        return -1;
+    }
     if (!ctx->current_mode) {
         fprintf(stderr, "[DRM] Page flip: current_mode not initialized\n");
         return -1;
@@ -407,9 +412,9 @@ int drm_page_flip_sync(ltc_drm_context_t *ctx) {
     int result = drmModeSetCrtc(ctx->fd, ctx->crtc_id, ctx->back.fb_id, 0, 0,
                                 &ctx->connector_id, 1, mode);
     if (result != 0) {
-        fprintf(stderr, "[DRM] drmModeSetCrtc (flip) failed: %s (errno=%d)\n", strerror(errno), errno);
-        /* Don't fail entirely, just log and continue */
-        return 0;  /* Return success anyway to keep loop going */
+        fprintf(stderr, "[DRM] drmModeSetCrtc (flip) failed: %s (errno=%d, fd=%d, crtc=%u, fb=%u)\n",
+                strerror(errno), errno, ctx->fd, ctx->crtc_id, ctx->back.fb_id);
+        return -1;
     }
 
     /* Swap front/back */
@@ -437,5 +442,6 @@ void drm_cleanup(ltc_drm_context_t *ctx) {
     }
     if (ctx->fd >= 0) {
         close(ctx->fd);
+        ctx->fd = -1;
     }
 }

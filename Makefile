@@ -4,7 +4,7 @@ CC ?= gcc
 BASE_CFLAGS = -std=c99 -Wall -Wextra -O2 -I./include
 
 # Package groups (queried individually so one missing .pc doesn't hide all others)
-MAIN_PKGS = libdrm libpng ltc alsa
+MAIN_PKGS = libdrm libpng ltc rtaudio
 CONFIG_PKGS = libdrm libpng libmicrohttpd libwebsockets
 
 # Resolve pkg-config flags package-by-package to avoid all-or-nothing failures

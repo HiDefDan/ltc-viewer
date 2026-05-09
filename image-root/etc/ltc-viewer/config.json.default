@@ -1,13 +1,19 @@
 {
   "timezone": "Europe/London",
   "ntp_server": "pool.ntp.org",
+  "display_width": 1920,
+  "display_height": 480,
   "refresh_hz": 60,
-  "timecode_x": 0,
-  "timecode_y": 0,
+  "timecode_x_offset": 0,
+  "timecode_y_offset": 0,
   "color_r": 64,
   "color_g": 255,
   "color_b": 64,
   "bg_color_r": 0,
   "bg_color_g": 0,
-  "bg_color_b": 0
+  "bg_color_b": 0,
+  "dsi_ltc_loss_behavior": 0,
+  "dsi_ltc_loss_timeout_sec": 3,
+  "hdmi_ltc_loss_behavior": 1,
+  "hdmi_ltc_loss_timeout_sec": 3
 }
