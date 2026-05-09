@@ -159,6 +159,12 @@ int main(int argc, char *argv[]) {
     size_t staging_size = 0;
     int logged_portrait_comp = 0;
 
+    /* Option A: dirty-suppression tracking */
+    char prev_timecode_str[32] = {0};
+    uint64_t render_op_count = 0;   /* renders performed in current 5-s window */
+    uint64_t skip_count = 0;        /* frames skipped (identical timecode) */
+    uint64_t total_render_ns = 0;   /* accumulated render time (ns) */
+
     clock_gettime(CLOCK_BOOTTIME, &ts);
     fflush(stdout);
     printf("[MAIN] Starting render loop at boot+%.3f s\n", ts.tv_sec + ts.tv_nsec/1e9);
@@ -277,83 +283,7 @@ int main(int argc, char *argv[]) {
             glyph_scale = (base_scale > 0.0f) ? base_scale : 1.0f;
         }
 
-        /* Create background color from config */
-        uint32_t bg_color = ((current_config.bg_color_r << 16) |
-                             (current_config.bg_color_g << 8) |
-                             (current_config.bg_color_b));
-
-        /* Clear framebuffer to configured background color */
-        uint32_t *fb32 = (uint32_t *)render_buffer;
-        uint32_t pixels = (render_pitch / 4) * render_height;
-        for (uint32_t i = 0; i < pixels; i++) {
-            fb32[i] = bg_color;
-        }
-
-        /* Calculate scaled glyph height for vertical centering */
-        uint32_t scaled_glyph_height = (uint32_t)(FONT_GLYPH_HEIGHT * glyph_scale + 0.5f);
-        
-        /* Calculate vertical center and apply offset */
-        int32_t center_y = (render_height > scaled_glyph_height) ?
-                           (int32_t)((render_height - scaled_glyph_height) / 2) : 0;
-        int32_t text_y_final = center_y + current_config.timecode_y_offset;
-        /* Clamp to valid range */
-        int32_t min_text_y = 0;
-        int32_t max_text_y = (int32_t)render_height - (int32_t)scaled_glyph_height;
-        if (max_text_y < 0) {
-            max_text_y = 0;
-        }
-        if (text_y_final < min_text_y) {
-            text_y_final = min_text_y;
-        }
-        if (text_y_final > max_text_y) {
-            text_y_final = max_text_y;
-        }
-
-        /* Calculate scaled string width for horizontal centering */
-        /* Timecode is "HH.MM.SS" = 6 digits + 2 periods (periods overlay, spacing=0) */
-        uint32_t base_string_width = 6 * DISPLAY_DIGIT_WIDTH;
-        uint32_t scaled_string_width = (uint32_t)(base_string_width * glyph_scale + 0.5f);
-
-        /* Calculate scaled digit width for background bounds */
-        uint32_t scaled_digit_width = (uint32_t)(DISPLAY_DIGIT_WIDTH * glyph_scale + 0.5f);
-        if (scaled_digit_width == 0) {
-            scaled_digit_width = 1;
-        }
-
-        /* Center timecode, then clamp so full 8-digit background stays on screen */
-        int32_t center_x = (render_width > scaled_string_width) ?
-                           (int32_t)((render_width - scaled_string_width) / 2) : 0;
-        int32_t text_x_final = center_x + current_config.timecode_x_offset;
-
-        int32_t min_text_x = (int32_t)scaled_digit_width;
-        int32_t max_text_x = (int32_t)render_width - (int32_t)(7 * scaled_digit_width);
-        if (text_x_final < min_text_x) {
-            text_x_final = min_text_x;
-        }
-        if (text_x_final > max_text_x) {
-            text_x_final = max_text_x;
-        }
-
-        if (text_x_final < 0) {
-            text_x_final = 0;
-        }
-        if ((uint32_t)text_x_final + scaled_string_width > render_width) {
-            text_x_final = (int32_t)(render_width - scaled_string_width);
-            if (text_x_final < 0) {
-                text_x_final = 0;
-            }
-        }
-
-        /* Background "8.8.8.8.8.8.8.8." positioned 1 digit width left of timecode */
-        /* Config X offset centers the background relative to screen */
-        uint32_t bg_x = ((uint32_t)text_x_final > scaled_digit_width) ?
-            ((uint32_t)text_x_final - scaled_digit_width) : 0;
-        
-        /* Render background layer (unlit 7-segment grid) */
-        font_blit_background_scaled(render_buffer, render_width, render_height, render_pitch,
-                        bg_x, text_y_final, glyph_scale);
-
-        /* Get current time and render timecode */
+        /* Compute timecode string first so we can skip render if unchanged */
         time_t now = time(NULL);
         if (now != last_time_display) {
             last_time_display = now;
@@ -369,49 +299,145 @@ int main(int argc, char *argv[]) {
         } else {
             ltc_frame_to_string(&ltc_frame, timecode_str, sizeof(timecode_str));
         }
-        
-        /* Render timecode with configured color and position */
-        /* Use center-relative offsets for both X and Y */
-        uint32_t text_x = (uint32_t)text_x_final;
-        uint32_t text_y = (uint32_t)text_y_final;
-        uint32_t text_color = ((current_config.color_r << 16) |
-                               (current_config.color_g << 8) |
-                               (current_config.color_b));
-        
-        font_blit_string_scaled(render_buffer, render_width, render_height, render_pitch,
-                    text_x, text_y, timecode_str,
-                    text_color, glyph_scale);
 
-        if (portrait_mode) {
-            rotate_argb8888_90ccw(render_buffer,
-                                  render_width,
-                                  render_height,
-                                  render_pitch,
-                                  back_buffer,
-                                  drm.back.pitch);
-        }
+        /* Option A: skip render and flip entirely when timecode is unchanged */
+        int need_render = (strcmp(timecode_str, prev_timecode_str) != 0);
+        if (need_render) {
+            memcpy(prev_timecode_str, timecode_str, sizeof(prev_timecode_str));
 
-        /* Page flip (vblank-synced) */
-        static int first_frame = 1;
-        if (first_frame) {
-            clock_gettime(CLOCK_BOOTTIME, &ts);
-            printf("[MAIN] First frame ready for flip at boot+%.3f s\n", ts.tv_sec + ts.tv_nsec/1e9);
-            fflush(stdout);
-            first_frame = 0;
-        }
+            struct timespec t_render_start, t_render_end;
+            clock_gettime(CLOCK_MONOTONIC, &t_render_start);
 
-        if (drm_page_flip_sync(&drm)) {
-            fprintf(stderr, "[MAIN] Page flip failed\n");
-            fflush(stderr);
-            break;
+            /* Create background color from config */
+            uint32_t bg_color = ((current_config.bg_color_r << 16) |
+                                 (current_config.bg_color_g << 8) |
+                                 (current_config.bg_color_b));
+
+            /* Clear framebuffer to configured background color */
+            uint32_t *fb32 = (uint32_t *)render_buffer;
+            uint32_t pixels = (render_pitch / 4) * render_height;
+            for (uint32_t i = 0; i < pixels; i++) {
+                fb32[i] = bg_color;
+            }
+
+            /* Calculate scaled glyph height for vertical centering */
+            uint32_t scaled_glyph_height = (uint32_t)(FONT_GLYPH_HEIGHT * glyph_scale + 0.5f);
+
+            /* Calculate vertical center and apply offset */
+            int32_t center_y = (render_height > scaled_glyph_height) ?
+                               (int32_t)((render_height - scaled_glyph_height) / 2) : 0;
+            int32_t text_y_final = center_y + current_config.timecode_y_offset;
+            /* Clamp to valid range */
+            int32_t min_text_y = 0;
+            int32_t max_text_y = (int32_t)render_height - (int32_t)scaled_glyph_height;
+            if (max_text_y < 0) {
+                max_text_y = 0;
+            }
+            if (text_y_final < min_text_y) {
+                text_y_final = min_text_y;
+            }
+            if (text_y_final > max_text_y) {
+                text_y_final = max_text_y;
+            }
+
+            /* Calculate scaled string width for horizontal centering */
+            /* Timecode is "HH.MM.SS.FF" = 8 digits + 3 periods (periods overlay, spacing=0) */
+            uint32_t base_string_width = 8 * DISPLAY_DIGIT_WIDTH;
+            uint32_t scaled_string_width = (uint32_t)(base_string_width * glyph_scale + 0.5f);
+
+            /* Calculate scaled digit width for background bounds */
+            uint32_t scaled_digit_width = (uint32_t)(DISPLAY_DIGIT_WIDTH * glyph_scale + 0.5f);
+            if (scaled_digit_width == 0) {
+                scaled_digit_width = 1;
+            }
+
+            /* Center timecode, then clamp so full background stays on screen */
+            int32_t center_x = (render_width > scaled_string_width) ?
+                               (int32_t)((render_width - scaled_string_width) / 2) : 0;
+            int32_t text_x_final = center_x + current_config.timecode_x_offset;
+
+            int32_t min_text_x = (int32_t)scaled_digit_width;
+            int32_t max_text_x = (int32_t)render_width - (int32_t)(9 * scaled_digit_width);
+            if (text_x_final < min_text_x) {
+                text_x_final = min_text_x;
+            }
+            if (text_x_final > max_text_x) {
+                text_x_final = max_text_x;
+            }
+            if (text_x_final < 0) {
+                text_x_final = 0;
+            }
+            if ((uint32_t)text_x_final + scaled_string_width > render_width) {
+                text_x_final = (int32_t)(render_width - scaled_string_width);
+                if (text_x_final < 0) {
+                    text_x_final = 0;
+                }
+            }
+
+            /* Background "8.8.8.8.8.8.8.8." positioned 1 digit width left of timecode */
+            uint32_t bg_x = ((uint32_t)text_x_final > scaled_digit_width) ?
+                ((uint32_t)text_x_final - scaled_digit_width) : 0;
+
+            /* Render background layer (unlit 7-segment grid) */
+            font_blit_background_scaled(render_buffer, render_width, render_height, render_pitch,
+                            bg_x, text_y_final, glyph_scale);
+
+            /* Render timecode */
+            uint32_t text_x = (uint32_t)text_x_final;
+            uint32_t text_y = (uint32_t)text_y_final;
+            uint32_t text_color = ((current_config.color_r << 16) |
+                                   (current_config.color_g << 8) |
+                                   (current_config.color_b));
+
+            font_blit_string_scaled(render_buffer, render_width, render_height, render_pitch,
+                        text_x, text_y, timecode_str,
+                        text_color, glyph_scale);
+
+            if (portrait_mode) {
+                rotate_argb8888_90ccw(render_buffer,
+                                      render_width,
+                                      render_height,
+                                      render_pitch,
+                                      back_buffer,
+                                      drm.back.pitch);
+            }
+
+            clock_gettime(CLOCK_MONOTONIC, &t_render_end);
+            total_render_ns += (uint64_t)(t_render_end.tv_sec - t_render_start.tv_sec) * 1000000000ULL
+                             + (uint64_t)(t_render_end.tv_nsec - t_render_start.tv_nsec);
+            render_op_count++;
+
+            /* Page flip (vblank-synced) */
+            static int first_frame = 1;
+            if (first_frame) {
+                clock_gettime(CLOCK_BOOTTIME, &ts);
+                printf("[MAIN] First frame ready for flip at boot+%.3f s\n", ts.tv_sec + ts.tv_nsec/1e9);
+                fflush(stdout);
+                first_frame = 0;
+            }
+
+            if (drm_page_flip_sync(&drm)) {
+                fprintf(stderr, "[MAIN] Page flip failed\n");
+                fflush(stderr);
+                break;
+            }
+        } else {
+            skip_count++;
         }
 
         frame_count++;
 
         /* Log status every ~5 seconds */
         if ((frame_count % (5 * drm.mode_vrefresh)) == 0) {
-            printf("[MAIN] Frame %" PRIu64 ", Timecode: %s\n", frame_count, timecode_str);
+            uint64_t avg_us = render_op_count > 0
+                ? total_render_ns / render_op_count / 1000 : 0;
+            printf("[MAIN] Frame %" PRIu64 ", TC: %s | rendered=%" PRIu64
+                   " skipped=%" PRIu64 " avg_render=%" PRIu64 "us\n",
+                   frame_count, timecode_str, render_op_count, skip_count, avg_us);
             fflush(stdout);
+            render_op_count = 0;
+            skip_count = 0;
+            total_render_ns = 0;
         }
 
         /* Yield CPU briefly to allow GPIO edges to be captured */

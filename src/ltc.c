@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "ltc.h"
 #include <stdio.h>
 #include <string.h>
@@ -42,13 +43,16 @@ int ltc_get_frame(ltc_decoder_t *decoder, ltc_frame_t *frame) {
 }
 
 void ltc_frame_to_string(const ltc_frame_t *frame, char *buf, size_t buflen) {
-    snprintf(buf, buflen, "%02u.%02u.%02u",
-             frame->hours, frame->minutes, frame->seconds);
+    snprintf(buf, buflen, "%02u.%02u.%02u.%02u",
+             frame->hours, frame->minutes, frame->seconds, frame->frame);
 }
 
 void ltc_frame_to_string_with_tz(const ltc_frame_t *frame, const struct tm *tm_local,
                                  char *buf, size_t buflen) {
-    /* Format system time as HH.MM.SS */
-    snprintf(buf, buflen, "%02d.%02d.%02d",
-             tm_local->tm_hour, tm_local->tm_min, tm_local->tm_sec);
+    /* Format system time as HH.MM.SS.cc (centiseconds from wall clock) */
+    struct timespec ts_wall;
+    clock_gettime(CLOCK_REALTIME, &ts_wall);
+    unsigned int cs = (unsigned int)(ts_wall.tv_nsec / 10000000);
+    snprintf(buf, buflen, "%02d.%02d.%02d.%02u",
+             tm_local->tm_hour, tm_local->tm_min, tm_local->tm_sec, cs);
 }

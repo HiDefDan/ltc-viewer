@@ -42,3 +42,5 @@ dtparam=fan_temp0=40000,fan_temp0_hyst=2000,fan_temp0_speed=100
 dtparam=fan_temp1=50000,fan_temp1_hyst=3000,fan_temp1_speed=160
 dtparam=fan_temp2=60000,fan_temp2_hyst=4000,fan_temp2_speed=210
 dtparam=fan_temp3=70000,fan_temp3_hyst=5000,fan_temp3_speed=255
+
+kernel=kernel8_rt.img

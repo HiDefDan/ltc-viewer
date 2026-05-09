@@ -27,7 +27,7 @@
 #define TZ_STRING               "Europe/London"
 
 /* Whether to display system time or pure LTC */
-#define SHOW_SYSTEM_TIME        1
+#define SHOW_SYSTEM_TIME        0
 
 /* LTC frame rate (24/25/30 fps) */
 #define LTC_FRAME_RATE          25
