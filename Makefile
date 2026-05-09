@@ -10,7 +10,7 @@ CONFIG_PKGS = libdrm libpng libmicrohttpd libwebsockets
 # Resolve pkg-config flags package-by-package to avoid all-or-nothing failures
 MAIN_CFLAGS = $(BASE_CFLAGS) \
 	$(foreach p,$(MAIN_PKGS),$(shell pkg-config --cflags $(p) 2>/dev/null))
-MAIN_LDFLAGS = $(foreach p,$(MAIN_PKGS),$(shell pkg-config --libs $(p) 2>/dev/null)) -pthread
+MAIN_LDFLAGS = $(foreach p,$(MAIN_PKGS),$(shell pkg-config --libs $(p) 2>/dev/null)) -pthread -lltc
 
 CONFIG_CFLAGS = $(BASE_CFLAGS) \
 	$(foreach p,$(CONFIG_PKGS),$(shell pkg-config --cflags $(p) 2>/dev/null))

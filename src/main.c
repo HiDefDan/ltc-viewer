@@ -12,7 +12,7 @@
 
 #include "drm.h"
 #include "font.h"
-#include "ltc.h"
+#include "ltc-timecode.h"
 #include "gpio.h"
 #include "config.h"
 #include "config-management.h"
