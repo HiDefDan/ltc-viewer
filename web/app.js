@@ -1,5 +1,5 @@
 const BASE_DISPLAY_WIDTH = 1920;
-const BASE_DISPLAY_HEIGHT = 1080;
+const BASE_DISPLAY_HEIGHT = 480;
 const BASE_TIME_STRING_HEIGHT = 256;
 
 class ConfigManager {
@@ -331,9 +331,8 @@ class ConfigManager {
         } catch (e) {
             console.error('Failed to load display modes:', e);
             this.displayModes = [
-                { width: BASE_DISPLAY_WIDTH, height: BASE_DISPLAY_HEIGHT, refresh: 50.00, preferred: false },
-                { width: BASE_DISPLAY_WIDTH, height: BASE_DISPLAY_HEIGHT, refresh: 59.94, preferred: false },
-                { width: BASE_DISPLAY_WIDTH, height: BASE_DISPLAY_HEIGHT, refresh: 60.00, preferred: false }
+                { width: BASE_DISPLAY_WIDTH, height: BASE_DISPLAY_HEIGHT, refresh: 60.00, preferred: true },
+                { width: BASE_DISPLAY_WIDTH, height: BASE_DISPLAY_HEIGHT, refresh: 59.94, preferred: false }
             ];
             this.preferredMode = null;
             this.populateResolutionSelect();
@@ -975,7 +974,7 @@ class ConfigManager {
             document.getElementById('ntpServer').value = 'pool.ntp.org';
             document.getElementById('displayResolution').value = `${BASE_DISPLAY_WIDTH}x${BASE_DISPLAY_HEIGHT}`;
             this.populateRefreshRateSelect(BASE_DISPLAY_WIDTH, BASE_DISPLAY_HEIGHT);
-            document.getElementById('refreshHz').value = '50.00';
+            document.getElementById('refreshHz').value = '60.00';
             this.updateTimecodeYBounds(BASE_DISPLAY_WIDTH, BASE_DISPLAY_HEIGHT);
             this.updateTimecodeXBounds(BASE_DISPLAY_WIDTH, BASE_DISPLAY_HEIGHT);
             document.getElementById('timecodeYOffset').value = 0;

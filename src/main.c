@@ -20,6 +20,31 @@
 
 static volatile int should_exit = 0;
 
+/*
+ * Rotate a landscape ARGB8888 image (src_w x src_h) into a portrait
+ * destination buffer (dst_w=src_h, dst_h=src_w), 90 degrees counter-clockwise.
+ */
+static void rotate_argb8888_90ccw(const uint8_t *src,
+                                  uint32_t src_w,
+                                  uint32_t src_h,
+                                  uint32_t src_pitch,
+                                  uint8_t *dst,
+                                  uint32_t dst_pitch) {
+    const uint32_t *src32 = (const uint32_t *)src;
+    uint32_t *dst32 = (uint32_t *)dst;
+    uint32_t src_stride = src_pitch / 4;
+    uint32_t dst_stride = dst_pitch / 4;
+
+    for (uint32_t y = 0; y < src_h; y++) {
+        for (uint32_t x = 0; x < src_w; x++) {
+            uint32_t pixel = src32[y * src_stride + x];
+            uint32_t dx = y;
+            uint32_t dy = src_w - 1 - x;
+            dst32[dy * dst_stride + dx] = pixel;
+        }
+    }
+}
+
 void signal_handler(int sig) {
     (void)sig;
     should_exit = 1;
@@ -130,6 +155,9 @@ int main(int argc, char *argv[]) {
     /* Main render loop */
     uint64_t frame_count = 0;
     time_t last_time_display = 0;
+    uint8_t *staging_buffer = NULL;
+    size_t staging_size = 0;
+    int logged_portrait_comp = 0;
 
     clock_gettime(CLOCK_BOOTTIME, &ts);
     fflush(stdout);
@@ -193,14 +221,60 @@ int main(int argc, char *argv[]) {
             break;
         }
 
-        uint32_t render_width = drm.back.hdisplay;
-        uint32_t render_height = drm.back.vdisplay;
+        uint32_t fb_width = drm.back.hdisplay;
+        uint32_t fb_height = drm.back.vdisplay;
+        int portrait_mode = (fb_height > fb_width);
 
-        float scale_x = (float)render_width / (float)DISPLAY_WIDTH;
-        float scale_y = (float)render_height / (float)DISPLAY_HEIGHT;
-        float glyph_scale = (scale_x < scale_y) ? scale_x : scale_y;
+        /*
+         * For portrait-only DSI modes (e.g. 480x1920), render into a logical
+         * landscape surface and rotate into the real framebuffer.
+         */
+        uint32_t render_width = portrait_mode ? fb_height : fb_width;
+        uint32_t render_height = portrait_mode ? fb_width : fb_height;
+        uint32_t render_pitch = portrait_mode ? (render_width * 4) : drm.back.pitch;
+
+        uint8_t *render_buffer = back_buffer;
+        if (portrait_mode) {
+            size_t needed = (size_t)render_pitch * (size_t)render_height;
+            if (staging_size != needed) {
+                uint8_t *new_buf = (uint8_t *)realloc(staging_buffer, needed);
+                if (!new_buf) {
+                    fprintf(stderr, "[MAIN] Failed to allocate portrait staging buffer (%zu bytes)\n", needed);
+                    break;
+                }
+                staging_buffer = new_buf;
+                staging_size = needed;
+            }
+            render_buffer = staging_buffer;
+
+            if (!logged_portrait_comp) {
+                printf("[MAIN] Portrait mode detected (%ux%u). Using logical render %ux%u with 90deg compensation.\n",
+                       fb_width, fb_height, render_width, render_height);
+                fflush(stdout);
+                logged_portrait_comp = 1;
+            }
+        }
+
+        float base_scale_x = (float)render_width / (float)DISPLAY_WIDTH;
+        float base_scale_y = (float)render_height / (float)DISPLAY_HEIGHT;
+        float base_scale = (base_scale_x < base_scale_y) ? base_scale_x : base_scale_y;
+
+        /*
+         * Choose glyph scale from target height, but clamp so:
+         * 1) glyph height fits render height
+         * 2) full 8-digit background ("8.8.8.8.8.8.8.8.") fits horizontally
+         */
+        float target_scale = (float)TIMECODE_FONT_HEIGHT / (float)FONT_GLYPH_HEIGHT;
+        float max_scale_h = (float)render_height / (float)FONT_GLYPH_HEIGHT;
+        float max_scale_bg = (float)render_width / (float)(8 * DISPLAY_DIGIT_WIDTH);
+        float max_safe_scale = (max_scale_h < max_scale_bg) ? max_scale_h : max_scale_bg;
+
+        float glyph_scale = target_scale;
+        if (glyph_scale > max_safe_scale) {
+            glyph_scale = max_safe_scale;
+        }
         if (glyph_scale <= 0.0f) {
-            glyph_scale = 1.0f;
+            glyph_scale = (base_scale > 0.0f) ? base_scale : 1.0f;
         }
 
         /* Create background color from config */
@@ -209,22 +283,30 @@ int main(int argc, char *argv[]) {
                              (current_config.bg_color_b));
 
         /* Clear framebuffer to configured background color */
-        uint32_t *fb32 = (uint32_t *)back_buffer;
-        uint32_t pixels = (drm.back.pitch / 4) * render_height;
+        uint32_t *fb32 = (uint32_t *)render_buffer;
+        uint32_t pixels = (render_pitch / 4) * render_height;
         for (uint32_t i = 0; i < pixels; i++) {
             fb32[i] = bg_color;
         }
 
         /* Calculate scaled glyph height for vertical centering */
-        uint32_t scaled_glyph_height = (uint32_t)(256.0f * glyph_scale + 0.5f);
+        uint32_t scaled_glyph_height = (uint32_t)(FONT_GLYPH_HEIGHT * glyph_scale + 0.5f);
         
         /* Calculate vertical center and apply offset */
-        uint32_t center_y = (render_height > scaled_glyph_height) ?
-                           ((render_height - scaled_glyph_height) / 2) : 0;
-        uint32_t text_y_final = center_y + current_config.timecode_y_offset;
+        int32_t center_y = (render_height > scaled_glyph_height) ?
+                           (int32_t)((render_height - scaled_glyph_height) / 2) : 0;
+        int32_t text_y_final = center_y + current_config.timecode_y_offset;
         /* Clamp to valid range */
-        if (text_y_final > render_height - scaled_glyph_height) {
-            text_y_final = render_height - scaled_glyph_height;
+        int32_t min_text_y = 0;
+        int32_t max_text_y = (int32_t)render_height - (int32_t)scaled_glyph_height;
+        if (max_text_y < 0) {
+            max_text_y = 0;
+        }
+        if (text_y_final < min_text_y) {
+            text_y_final = min_text_y;
+        }
+        if (text_y_final > max_text_y) {
+            text_y_final = max_text_y;
         }
 
         /* Calculate scaled string width for horizontal centering */
@@ -268,7 +350,7 @@ int main(int argc, char *argv[]) {
             ((uint32_t)text_x_final - scaled_digit_width) : 0;
         
         /* Render background layer (unlit 7-segment grid) */
-        font_blit_background_scaled(back_buffer, render_width, render_height, drm.back.pitch,
+        font_blit_background_scaled(render_buffer, render_width, render_height, render_pitch,
                         bg_x, text_y_final, glyph_scale);
 
         /* Get current time and render timecode */
@@ -291,14 +373,23 @@ int main(int argc, char *argv[]) {
         /* Render timecode with configured color and position */
         /* Use center-relative offsets for both X and Y */
         uint32_t text_x = (uint32_t)text_x_final;
-        uint32_t text_y = text_y_final;
+        uint32_t text_y = (uint32_t)text_y_final;
         uint32_t text_color = ((current_config.color_r << 16) |
                                (current_config.color_g << 8) |
                                (current_config.color_b));
         
-        font_blit_string_scaled(back_buffer, render_width, render_height, drm.back.pitch,
+        font_blit_string_scaled(render_buffer, render_width, render_height, render_pitch,
                     text_x, text_y, timecode_str,
                     text_color, glyph_scale);
+
+        if (portrait_mode) {
+            rotate_argb8888_90ccw(render_buffer,
+                                  render_width,
+                                  render_height,
+                                  render_pitch,
+                                  back_buffer,
+                                  drm.back.pitch);
+        }
 
         /* Page flip (vblank-synced) */
         static int first_frame = 1;
@@ -331,6 +422,7 @@ int main(int argc, char *argv[]) {
     printf("[MAIN] Shutting down...\n");
 
     /* Cleanup */
+    free(staging_buffer);
     config_watcher_cleanup(&config_watcher);
     gpio_cleanup(&gpio);
     drm_cleanup(&drm);

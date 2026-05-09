@@ -1,0 +1,13 @@
+{
+  "timezone": "Europe/London",
+  "ntp_server": "pool.ntp.org",
+  "refresh_hz": 60,
+  "timecode_x": 0,
+  "timecode_y": 0,
+  "color_r": 64,
+  "color_g": 255,
+  "color_b": 64,
+  "bg_color_r": 0,
+  "bg_color_g": 0,
+  "bg_color_b": 0
+}

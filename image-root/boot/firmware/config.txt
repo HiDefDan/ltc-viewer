@@ -1,0 +1,44 @@
+dtparam=audio=on
+auto_initramfs=1
+
+# Core Driver
+dtoverlay=vc4-kms-v3d
+
+# DSI panel selection (keep only one active)
+# DSI1 Use
+# dtoverlay=vc4-kms-dsi-waveshare-panel-v2,8_8_inch_a
+# DSI0 Use
+dtoverlay=vc4-kms-dsi-waveshare-panel-v2,8_8_inch_a,dsi0
+
+# IMPORTANT: Comment this out or delete it
+# disable_fw_kms_setup=1
+
+# Ensure DSI is checked first
+display_default_lcd=1
+
+# For RPi 4/5, explicitly set FB assignment priority
+# 0 = DSI/LCD, 2 = HDMI0, 7 = HDMI1
+framebuffer_priority=0
+
+# Disable auto-detect to prevent HDMI from stealing slot 0 during hotplug
+display_auto_detect=0
+
+arm_64bit=1
+disable_overscan=1
+arm_boost=1
+
+[cm5]
+dtoverlay=dwc2,dr_mode=host
+dtparam=rtc_bbat_vchg=3000000
+
+[all]
+
+# HiFiBerry Studio DAC+ADC HAT
+dtoverlay=hifiberry-dacplusadcpro
+
+# CM5 fan: PWM speed control (30x7mm, 5V)
+# Temperatures in millidegrees Celsius; speed 0-255
+dtparam=fan_temp0=40000,fan_temp0_hyst=2000,fan_temp0_speed=100
+dtparam=fan_temp1=50000,fan_temp1_hyst=3000,fan_temp1_speed=160
+dtparam=fan_temp2=60000,fan_temp2_hyst=4000,fan_temp2_speed=210
+dtparam=fan_temp3=70000,fan_temp3_hyst=5000,fan_temp3_speed=255

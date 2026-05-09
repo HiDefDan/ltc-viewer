@@ -79,7 +79,7 @@ void config_default(ltc_config_t *config) {
     strcpy(config->custom_ntp_servers, "[]");
     config->display_width = DISPLAY_WIDTH;
     config->display_height = DISPLAY_HEIGHT;
-    config->refresh_hz = 50;
+    config->refresh_hz = TARGET_REFRESH_HZ;
     config->timecode_x_offset = 0; /* Centered horizontally */
     config->timecode_y_offset = 0; /* Centered vertically */
     config->color_r = 64;

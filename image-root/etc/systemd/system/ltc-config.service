@@ -1,0 +1,16 @@
+[Unit]
+Description=LTC Viewer Configuration Service
+After=network.target
+Before=ltc-timecode.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/ltc-config-daemon -p 8080 -c /etc/ltc-viewer/config.json
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

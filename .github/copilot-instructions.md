@@ -4,7 +4,6 @@
 - [ ] Implement DRM initialization and page flipping
 - [ ] Implement bitmap font rendering engine
 - [ ] Implement LTC decoder (bi-phase) stub
-- [ ] Implement GPIO edge capture stub (pigpio ready)
 - [ ] Create main render loop with vblank sync
 - [ ] Compile and test on Raspberry Pi 5
 - [ ] Set up systemd service for autostart
