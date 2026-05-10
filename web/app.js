@@ -649,6 +649,7 @@ class ConfigManager {
         if (xSlider) {
             xSlider.value = clampedX;
         }
+        document.getElementById('transitionFadeMs').value = this.config.transition_fade_ms ?? 120;
 
         document.getElementById('colorR').value = this.config.color_r || 64;
         document.getElementById('colorRValue').value = this.config.color_r || 64;
@@ -981,6 +982,7 @@ class ConfigManager {
             document.getElementById('timecodeXOffset').value = 0;
             document.getElementById('timecodeYOffsetSlider').value = 0;
             document.getElementById('timecodeXOffsetSlider').value = 0;
+            document.getElementById('transitionFadeMs').value = 120;
 
             document.getElementById('colorR').value = 64;
             document.getElementById('colorRValue').value = 64;
@@ -1030,6 +1032,7 @@ class ConfigManager {
             refresh_hz: parseFloat(document.getElementById('refreshHz').value),
             timecode_x_offset: clampedX,
             timecode_y_offset: clampedY,
+            transition_fade_ms: parseInt(document.getElementById('transitionFadeMs').value) || 0,
             color_r: parseInt(document.getElementById('colorR').value),
             color_g: parseInt(document.getElementById('colorG').value),
             color_b: parseInt(document.getElementById('colorB').value),

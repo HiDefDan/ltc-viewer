@@ -191,6 +191,95 @@ static void copy_argb_rect(uint8_t *dst,
     }
 }
 
+static int dump_render_buffer_bmp(const char *path,
+                                  const uint8_t *fb,
+                                  uint32_t width,
+                                  uint32_t height,
+                                  uint32_t pitch)
+{
+    if (!path || !fb || width == 0 || height == 0 || pitch < width * 4u) {
+        return -1;
+    }
+
+    FILE *out = fopen(path, "wb");
+    if (!out) {
+        return -1;
+    }
+
+    uint32_t row_bytes = width * 3u;
+    uint32_t row_padded = (row_bytes + 3u) & ~3u;
+    uint32_t image_size = row_padded * height;
+    uint32_t file_size = 14u + 40u + image_size;
+
+    unsigned char file_header[14] = {
+        'B', 'M',
+        (unsigned char)(file_size & 0xFFu),
+        (unsigned char)((file_size >> 8) & 0xFFu),
+        (unsigned char)((file_size >> 16) & 0xFFu),
+        (unsigned char)((file_size >> 24) & 0xFFu),
+        0, 0, 0, 0,
+        54, 0, 0, 0
+    };
+
+    int32_t neg_height = -(int32_t)height; /* top-down bitmap */
+    unsigned char dib_header[40] = {
+        40, 0, 0, 0,
+        (unsigned char)(width & 0xFFu),
+        (unsigned char)((width >> 8) & 0xFFu),
+        (unsigned char)((width >> 16) & 0xFFu),
+        (unsigned char)((width >> 24) & 0xFFu),
+        (unsigned char)(neg_height & 0xFF),
+        (unsigned char)((neg_height >> 8) & 0xFF),
+        (unsigned char)((neg_height >> 16) & 0xFF),
+        (unsigned char)((neg_height >> 24) & 0xFF),
+        1, 0,
+        24, 0,
+        0, 0, 0, 0,
+        (unsigned char)(image_size & 0xFFu),
+        (unsigned char)((image_size >> 8) & 0xFFu),
+        (unsigned char)((image_size >> 16) & 0xFFu),
+        (unsigned char)((image_size >> 24) & 0xFFu),
+        0x13, 0x0B, 0, 0,
+        0x13, 0x0B, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0
+    };
+
+    if (fwrite(file_header, 1, sizeof(file_header), out) != sizeof(file_header) ||
+        fwrite(dib_header, 1, sizeof(dib_header), out) != sizeof(dib_header)) {
+        fclose(out);
+        return -1;
+    }
+
+    uint8_t *row = malloc(row_padded);
+    if (!row) {
+        fclose(out);
+        return -1;
+    }
+
+    for (uint32_t y = 0; y < height; y++) {
+        const uint8_t *src = fb + (size_t)y * (size_t)pitch;
+        for (uint32_t x = 0; x < width; x++) {
+            /* Render buffer is XRGB8888 in memory order B,G,R,X on little-endian. */
+            row[x * 3u + 0u] = src[x * 4u + 0u];
+            row[x * 3u + 1u] = src[x * 4u + 1u];
+            row[x * 3u + 2u] = src[x * 4u + 2u];
+        }
+        for (uint32_t p = row_bytes; p < row_padded; p++) {
+            row[p] = 0;
+        }
+        if (fwrite(row, 1, row_padded, out) != row_padded) {
+            free(row);
+            fclose(out);
+            return -1;
+        }
+    }
+
+    free(row);
+    fclose(out);
+    return 0;
+}
+
 static uint32_t tc_index_24h(const ltc_frame_t *f, uint32_t fps)
 {
     uint32_t sec_of_day = f->hours * 3600u + f->minutes * 60u + f->seconds;
@@ -418,6 +507,15 @@ int main(int argc, char *argv[]) {
 
     /* Option A: dirty-suppression tracking */
     char prev_timecode_str[32] = {0};
+    char displayed_timecode_str[32] = {0};
+    uint32_t displayed_text_color = 0;
+    int have_displayed_timecode = 0;
+    int source_fade_active = 0;
+    uint64_t source_fade_start_ns = 0;
+    char fade_from_str[32] = {0};
+    uint32_t fade_from_color = 0;
+    char fade_to_str[32] = {0};
+    uint32_t fade_to_color = 0;
     uint64_t render_op_count = 0;   /* renders performed in current 5-s window */
     uint64_t skip_count = 0;        /* frames skipped (identical timecode) */
     uint64_t total_render_ns = 0;   /* accumulated render time (ns) */
@@ -434,6 +532,10 @@ int main(int argc, char *argv[]) {
     uint64_t target_ltc_mono_ns = 0;
     int has_ltc_frame = 0;
     int has_target_ltc_frame = 0;
+    int prev_display_ltc_active = 0;
+    const char *framegrab_dir = getenv("LTC_FRAMEGRAB_DIR");
+    int framegrab_ltc_done = 0;
+    int framegrab_tod_done = 0;
     time_t last_ltc_seen = 0;
     struct timespec last_smooth_ts = {0};
     int smooth_clock_init = 0;
@@ -655,13 +757,43 @@ int main(int argc, char *argv[]) {
 
         /* Consider LTC live for one second after the latest decoded frame. */
         int ltc_live = has_ltc_frame && ((now - last_ltc_seen) <= 1);
+        /* Display source remains LTC until configured loss timeout expires. */
+        int display_ltc_active = has_ltc_frame;
 
-        /* Only render/flip on fresh LTC data, and only when visible text changed. */
-        int need_render = got_ltc && (strcmp(timecode_str, prev_timecode_str) != 0);
-        if (need_render) {
-            struct timespec ts_now_mono;
-            clock_gettime(CLOCK_MONOTONIC, &ts_now_mono);
-            uint64_t now_mono_ns = (uint64_t)ts_now_mono.tv_sec * 1000000000ULL + (uint64_t)ts_now_mono.tv_nsec;
+        uint32_t target_text_color;
+        if (display_ltc_active) {
+            target_text_color = 0x00FF0000;
+        } else {
+            target_text_color = ((current_config.color_r << 16) |
+                                 (current_config.color_g << 8) |
+                                 (current_config.color_b));
+        }
+
+        struct timespec ts_loop_mono;
+        clock_gettime(CLOCK_MONOTONIC, &ts_loop_mono);
+        uint64_t loop_mono_ns = (uint64_t)ts_loop_mono.tv_sec * 1000000000ULL + (uint64_t)ts_loop_mono.tv_nsec;
+
+        /* Hybrid render gate:
+         * - Live LTC: redraw only on fresh decoded frames and visible text changes.
+         * - No live LTC: redraw on ToD text changes so fallback remains active.
+         * - Always redraw on LTC live/loss transitions for immediate UX feedback. */
+        int text_changed = (strcmp(timecode_str, prev_timecode_str) != 0);
+        int display_state_changed = (display_ltc_active != prev_display_ltc_active);
+
+        if (display_state_changed && have_displayed_timecode) {
+            memcpy(fade_from_str, displayed_timecode_str, sizeof(fade_from_str));
+            fade_from_color = displayed_text_color;
+            memcpy(fade_to_str, timecode_str, sizeof(fade_to_str));
+            fade_to_color = target_text_color;
+            source_fade_active = 1;
+            source_fade_start_ns = loop_mono_ns;
+        }
+
+        int need_render = (display_ltc_active ? (got_ltc && text_changed) : text_changed) ||
+                          display_state_changed || source_fade_active;
+        prev_display_ltc_active = display_ltc_active;
+        if (need_render && !source_fade_active) {
+            uint64_t now_mono_ns = loop_mono_ns;
 
             uint64_t min_interval_ns;
             if (ltc_live) {
@@ -824,25 +956,69 @@ int main(int argc, char *argv[]) {
             /* Render timecode */
             uint32_t text_x = (uint32_t)text_x_final;
             uint32_t text_y = (uint32_t)text_y_final;
-            uint32_t text_color;
-            if (ltc_live) {
-                /* Live incoming LTC is always shown in red for at-a-glance status. */
-                text_color = 0x00FF0000;
-            } else {
-                text_color = ((current_config.color_r << 16) |
-                              (current_config.color_g << 8) |
-                              (current_config.color_b));
-            }
+            if (source_fade_active) {
+                uint64_t source_fade_duration_ns = (uint64_t)(current_config.transition_fade_ms > 0
+                    ? current_config.transition_fade_ms : 0) * 1000000ULL;
+                uint64_t render_mono_ns = (uint64_t)t_render_start.tv_sec * 1000000000ULL + (uint64_t)t_render_start.tv_nsec;
+                uint64_t elapsed_ns = (render_mono_ns > source_fade_start_ns)
+                    ? (render_mono_ns - source_fade_start_ns) : 0;
+                uint32_t alpha_to = 255u;
 
-            if (portrait_mode) {
-                font_blit_string_scaled_rot90ccw(render_buffer, fb_width, fb_height, render_pitch,
-                                                 render_width, render_height,
-                                                 text_x, text_y, timecode_str,
-                                                 text_color, glyph_scale);
+                if (source_fade_duration_ns > 0) {
+                    alpha_to = (elapsed_ns >= source_fade_duration_ns)
+                        ? 255u : (uint32_t)((elapsed_ns * 255u) / source_fade_duration_ns);
+                }
+                uint32_t alpha_from = 255u - alpha_to;
+
+                uint32_t from_color = ((alpha_from & 0xFFu) << 24) | (fade_from_color & 0x00FFFFFFu);
+                uint32_t to_color = ((alpha_to & 0xFFu) << 24) | (fade_to_color & 0x00FFFFFFu);
+
+                if (alpha_from > 0) {
+                    if (portrait_mode) {
+                        font_blit_string_scaled_rot90ccw(render_buffer, fb_width, fb_height, render_pitch,
+                                                         render_width, render_height,
+                                                         text_x, text_y, fade_from_str,
+                                                         from_color, glyph_scale);
+                    } else {
+                        font_blit_string_scaled(render_buffer, render_width, render_height, render_pitch,
+                                                text_x, text_y, fade_from_str,
+                                                from_color, glyph_scale);
+                    }
+                }
+
+                if (alpha_to > 0) {
+                    if (portrait_mode) {
+                        font_blit_string_scaled_rot90ccw(render_buffer, fb_width, fb_height, render_pitch,
+                                                         render_width, render_height,
+                                                         text_x, text_y, fade_to_str,
+                                                         to_color, glyph_scale);
+                    } else {
+                        font_blit_string_scaled(render_buffer, render_width, render_height, render_pitch,
+                                                text_x, text_y, fade_to_str,
+                                                to_color, glyph_scale);
+                    }
+                }
+
+                if (source_fade_duration_ns == 0 || elapsed_ns >= source_fade_duration_ns) {
+                    source_fade_active = 0;
+                    memcpy(displayed_timecode_str, fade_to_str, sizeof(displayed_timecode_str));
+                    displayed_text_color = fade_to_color;
+                    have_displayed_timecode = 1;
+                }
             } else {
-                font_blit_string_scaled(render_buffer, render_width, render_height, render_pitch,
-                                        text_x, text_y, timecode_str,
-                                        text_color, glyph_scale);
+                if (portrait_mode) {
+                    font_blit_string_scaled_rot90ccw(render_buffer, fb_width, fb_height, render_pitch,
+                                                     render_width, render_height,
+                                                     text_x, text_y, timecode_str,
+                                                     target_text_color, glyph_scale);
+                } else {
+                    font_blit_string_scaled(render_buffer, render_width, render_height, render_pitch,
+                                            text_x, text_y, timecode_str,
+                                            target_text_color, glyph_scale);
+                }
+                memcpy(displayed_timecode_str, timecode_str, sizeof(displayed_timecode_str));
+                displayed_text_color = target_text_color;
+                have_displayed_timecode = 1;
             }
 
             if (current_config.debug_overlay_enabled) {
@@ -890,6 +1066,24 @@ int main(int argc, char *argv[]) {
                                   render_width, render_height, portrait_mode,
                                   df_x, overlay_y,
                                   overlay_color, overlay_scale * 0.72f);
+                }
+            }
+
+            if (framegrab_dir && framegrab_dir[0] != '\0') {
+                if (display_ltc_active && !source_fade_active && !framegrab_ltc_done) {
+                    char path[512];
+                    snprintf(path, sizeof(path), "%s/ltc-live.bmp", framegrab_dir);
+                    if (dump_render_buffer_bmp(path, render_buffer, fb_width, fb_height, render_pitch) == 0) {
+                        framegrab_ltc_done = 1;
+                        printf("[FRAMEGRAB] Captured LTC frame: %s\n", path);
+                    }
+                } else if (!display_ltc_active && !source_fade_active && !framegrab_tod_done) {
+                    char path[512];
+                    snprintf(path, sizeof(path), "%s/tod-fallback.bmp", framegrab_dir);
+                    if (dump_render_buffer_bmp(path, render_buffer, fb_width, fb_height, render_pitch) == 0) {
+                        framegrab_tod_done = 1;
+                        printf("[FRAMEGRAB] Captured ToD frame: %s\n", path);
+                    }
                 }
             }
 

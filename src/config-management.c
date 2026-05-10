@@ -93,6 +93,7 @@ void config_default(ltc_config_t *config) {
     config->dsi_ltc_loss_timeout_sec = 3;
     config->hdmi_ltc_loss_behavior = LTC_LOSS_RESTORE_TOD;
     config->hdmi_ltc_loss_timeout_sec = 3;
+    config->transition_fade_ms = 120;
     config->debug_overlay_enabled = 0;
     
     /* Network defaults */
@@ -160,6 +161,12 @@ static void clamp_ltc_loss_behavior(ltc_config_t *config) {
     if (config->hdmi_ltc_loss_timeout_sec < 0) {
         config->hdmi_ltc_loss_timeout_sec = 0;
     }
+    if (config->transition_fade_ms < 0) {
+        config->transition_fade_ms = 0;
+    }
+    if (config->transition_fade_ms > 2000) {
+        config->transition_fade_ms = 2000;
+    }
 }
 
 // Simple JSON float extraction helper
@@ -214,6 +221,7 @@ int config_from_json(const char *json_str, ltc_config_t *config) {
     json_extract_int(json_str, "dsi_ltc_loss_timeout_sec", &config->dsi_ltc_loss_timeout_sec);
     json_extract_int(json_str, "hdmi_ltc_loss_behavior", &config->hdmi_ltc_loss_behavior);
     json_extract_int(json_str, "hdmi_ltc_loss_timeout_sec", &config->hdmi_ltc_loss_timeout_sec);
+    json_extract_int(json_str, "transition_fade_ms", &config->transition_fade_ms);
     json_extract_int(json_str, "debug_overlay_enabled", &config->debug_overlay_enabled);
     
     /* Network settings */
@@ -253,6 +261,7 @@ char* config_to_json(const ltc_config_t *config) {
         "  \"dsi_ltc_loss_timeout_sec\": %d,\n"
         "  \"hdmi_ltc_loss_behavior\": %d,\n"
         "  \"hdmi_ltc_loss_timeout_sec\": %d,\n"
+        "  \"transition_fade_ms\": %d,\n"
         "  \"debug_overlay_enabled\": %d,\n"
         "  \"admin_vlan_enabled\": %d,\n"
         "  \"admin_vlan_ip\": \"%s\",\n"
@@ -278,6 +287,7 @@ char* config_to_json(const ltc_config_t *config) {
         config->dsi_ltc_loss_timeout_sec,
         config->hdmi_ltc_loss_behavior,
         config->hdmi_ltc_loss_timeout_sec,
+        config->transition_fade_ms,
         config->debug_overlay_enabled,
         config->admin_vlan_enabled,
         config->admin_vlan_ip,

@@ -32,6 +32,7 @@ typedef struct {
     int valid;
     char ch;
     uint32_t fg_color;
+    uint8_t fg_alpha;
     uint32_t scale_key;
     uint32_t scaled_w;
     uint32_t scaled_h;
@@ -323,6 +324,10 @@ static glyph_cache_entry_t *font_get_cached_glyph(char ch, uint32_t fg_color, fl
 
     entry->ch = ch;
     entry->fg_color = fg_color & 0x00FFFFFFu;
+    entry->fg_alpha = (uint8_t)((fg_color >> 24) & 0xFFu);
+    if (entry->fg_alpha == 0) {
+        entry->fg_alpha = 0xFFu;
+    }
     entry->scale_key = scale_key;
     entry->last_used_tick = glyph_cache_tick;
     entry->valid = 1;
@@ -364,6 +369,7 @@ static void font_blit_glyph_scaled_internal(uint8_t *fb, uint32_t fb_width, uint
 
     uint32_t stride = fb_pitch / 4;
     uint32_t fg_rgb = entry->fg_color;
+    uint32_t fg_alpha = entry->fg_alpha;
     for (uint32_t row = 0; row < entry->scaled_h; row++) {
         uint32_t dst_y = y + row;
         if (dst_y >= fb_height) {
@@ -385,6 +391,7 @@ static void font_blit_glyph_scaled_internal(uint8_t *fb, uint32_t fb_width, uint
             if (alpha == 0) {
                 continue;
             }
+            alpha = (uint8_t)(((uint32_t)alpha * fg_alpha + 127u) / 255u);
 
             size_t idx = (size_t)dst_y * stride + dst_x;
             uint32_t *dst_px = &((uint32_t *)fb)[idx];
@@ -412,6 +419,7 @@ static void font_blit_glyph_scaled_internal_rot90ccw(uint8_t *fb,
 
     uint32_t stride = fb_pitch / 4;
     uint32_t fg_rgb = entry->fg_color;
+    uint32_t fg_alpha = entry->fg_alpha;
 
     for (uint32_t row = 0; row < entry->scaled_h; row++) {
         uint32_t logical_y = y + row;
@@ -435,6 +443,7 @@ static void font_blit_glyph_scaled_internal_rot90ccw(uint8_t *fb,
             if (alpha == 0) {
                 continue;
             }
+            alpha = (uint8_t)(((uint32_t)alpha * fg_alpha + 127u) / 255u);
 
             uint32_t phys_x = logical_y;
             uint32_t phys_y = logical_width - 1 - logical_x;

@@ -26,6 +26,7 @@ typedef struct {
     int dsi_ltc_loss_timeout_sec;
     int hdmi_ltc_loss_behavior;
     int hdmi_ltc_loss_timeout_sec;
+    int transition_fade_ms;        // LTC<->ToD transition fade duration in milliseconds
     int debug_overlay_enabled;      // 1 to show compact on-screen debug metrics
     
     // Network settings

@@ -16,5 +16,6 @@
   "dsi_ltc_loss_timeout_sec": 3,
   "hdmi_ltc_loss_behavior": 1,
   "hdmi_ltc_loss_timeout_sec": 3,
+  "transition_fade_ms": 120,
   "debug_overlay_enabled": 0
 }

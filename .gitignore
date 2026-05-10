@@ -22,3 +22,6 @@ src/web-embedded.c
 
 # local test files
 test/
+
+# local framegrab artifacts
+framegrabs/

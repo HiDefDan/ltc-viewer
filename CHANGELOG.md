@@ -14,6 +14,8 @@ All notable changes to this project are documented in this file.
 
 ### Added
 - Introduced this changelog to track runtime and rendering changes.
+- Added configurable LTC/ToD transition fade duration (`transition_fade_ms`) with web UI control.
+- Added temporary render-buffer framegrab hook for UX review captures (`LTC_FRAMEGRAB_DIR` environment override).
 
 ### Changed
 - Switched portrait display path to direct portrait rendering (removed full-frame software rotation pass).
@@ -24,6 +26,8 @@ All notable changes to this project are documented in this file.
 - Added optional dirty-region restore path in portrait mode to reduce framebuffer copy bandwidth.
 - Added explicit main-thread CPU affinity pinning to core 3 (`sched_setaffinity`) early in startup.
 - Gated render/flip work in `main` loop to fresh LTC data (`shared->fresh` path via `got_ltc`).
+- Added config model/default persistence for `transition_fade_ms` in runtime and image payload defaults.
+- Updated source-state fade capture behavior to only framegrab after fade completion, avoiding transition-frame mislabels.
 
 ### Performance Snapshot (CM5 + Waveshare 8.8 DSI)
 - Baseline (software-rotate era): ~71% CPU, ~35 ms avg_render.
@@ -48,6 +52,7 @@ All notable changes to this project are documented in this file.
 | B | `3` | CPU 3 | 33.0 | 5692.7 | 8.7 | 8.2% |
 
 - Result: kept `CPUAffinity=3` as the standard service policy (simpler isolation, equal/better render timing in sampled runs).
+- `LTC_FRAMEGRAB_DIR=/path` (via service manager environment) now captures one `ltc-live.bmp` and one `tod-fallback.bmp` from the actual render buffer for offline UX checks.
 
 ## 2026-05-09
 

@@ -33,7 +33,13 @@ Low-latency LTC timecode display appliance for Raspberry Pi CM5 using DRM/KMS fr
 ## Configuration UI
 
 - Default URL: `http://<device-ip>:8080`
-- Supports timezone, network, display position, and color settings
+- Supports timezone, network, display position, color settings, and LTC/ToD transition fade duration
+
+## UX Framegrabs (Temporary)
+
+- For offline UX review, the renderer supports one-shot framegrabs from the actual render buffer when `LTC_FRAMEGRAB_DIR` is set in the service environment.
+- Generated files: `ltc-live.bmp` and `tod-fallback.bmp` (captured after transition fade completes).
+- Clear the environment override after captures to return to normal operation.
 
 ## Performance Progression (May 2026)
 
