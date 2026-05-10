@@ -48,12 +48,12 @@ Low-latency LTC timecode display appliance for Raspberry Pi CM5 using DRM/KMS fr
    - `bluetooth.service`
    - `console-setup.service`
    - `keyboard-setup.service`
-   - `NetworkManager-wait-online.service`
    - `udisks2.service`
    - `e2scrub_reap.service`
    - `rpi-eeprom-update.service`
+- `NetworkManager-wait-online.service` was restored to keep remote Wi-Fi bring-up predictable during cold boot.
 - One-line rollback:
-   - `sudo systemctl enable --now bluetooth.service console-setup.service keyboard-setup.service NetworkManager-wait-online.service udisks2.service e2scrub_reap.service rpi-eeprom-update.service`
+   - `sudo systemctl enable --now bluetooth.service console-setup.service keyboard-setup.service udisks2.service e2scrub_reap.service rpi-eeprom-update.service`
 
 ## Performance Progression (May 2026)
 

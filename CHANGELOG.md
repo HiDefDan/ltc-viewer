@@ -36,10 +36,10 @@ All notable changes to this project are documented in this file.
 	- disabled `bluetooth.service`
 	- disabled `console-setup.service`
 	- disabled `keyboard-setup.service`
-	- disabled `NetworkManager-wait-online.service`
 	- disabled `udisks2.service`
 	- disabled `e2scrub_reap.service`
 	- disabled `rpi-eeprom-update.service`
+	- initially disabled `NetworkManager-wait-online.service`, then restored it after field validation to avoid Wi-Fi/remote-access startup surprises
 
 ### Performance Snapshot (CM5 + Waveshare 8.8 DSI)
 - Baseline (software-rotate era): ~71% CPU, ~35 ms avg_render.
