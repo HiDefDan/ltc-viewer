@@ -41,6 +41,20 @@ Low-latency LTC timecode display appliance for Raspberry Pi CM5 using DRM/KMS fr
 - Generated files: `ltc-live.bmp` and `tod-fallback.bmp` (captured after transition fade completes).
 - Clear the environment override after captures to return to normal operation.
 
+## Boot Slimming Profile
+
+- Current appliance profile keeps `avahi-daemon` (mDNS), `cron`, `systemd-timesyncd` (NTP), `NetworkManager`, `wpa_supplicant`, and `ssh` enabled.
+- The following services were disabled to reduce boot-to-display latency:
+   - `bluetooth.service`
+   - `console-setup.service`
+   - `keyboard-setup.service`
+   - `NetworkManager-wait-online.service`
+   - `udisks2.service`
+   - `e2scrub_reap.service`
+   - `rpi-eeprom-update.service`
+- One-line rollback:
+   - `sudo systemctl enable --now bluetooth.service console-setup.service keyboard-setup.service NetworkManager-wait-online.service udisks2.service e2scrub_reap.service rpi-eeprom-update.service`
+
 ## Performance Progression (May 2026)
 
 The following measurements were captured on-device on CM5 + Waveshare 8.8 inch DSI (480x1920 @ ~60 Hz), with live LTC near 29.97 fps.

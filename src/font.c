@@ -239,6 +239,11 @@ static glyph_cache_entry_t *font_get_cached_glyph(char ch, uint32_t fg_color, fl
     }
 
     uint32_t scale_key = (uint32_t)(scale * 10000.0f + 0.5f);
+    uint32_t fg_rgb_key = fg_color & 0x00FFFFFFu;
+    uint8_t fg_alpha_key = (uint8_t)((fg_color >> 24) & 0xFFu);
+    if (fg_alpha_key == 0) {
+        fg_alpha_key = 0xFFu;
+    }
     glyph_cache_tick++;
 
     glyph_cache_entry_t *free_slot = NULL;
@@ -252,7 +257,10 @@ static glyph_cache_entry_t *font_get_cached_glyph(char ch, uint32_t fg_color, fl
             continue;
         }
 
-        if (entry->ch == ch && entry->fg_color == fg_color && entry->scale_key == scale_key) {
+        if (entry->ch == ch &&
+            entry->fg_color == fg_rgb_key &&
+            entry->fg_alpha == fg_alpha_key &&
+            entry->scale_key == scale_key) {
             entry->last_used_tick = glyph_cache_tick;
             return entry;
         }
@@ -323,11 +331,8 @@ static glyph_cache_entry_t *font_get_cached_glyph(char ch, uint32_t fg_color, fl
     }
 
     entry->ch = ch;
-    entry->fg_color = fg_color & 0x00FFFFFFu;
-    entry->fg_alpha = (uint8_t)((fg_color >> 24) & 0xFFu);
-    if (entry->fg_alpha == 0) {
-        entry->fg_alpha = 0xFFu;
-    }
+    entry->fg_color = fg_rgb_key;
+    entry->fg_alpha = fg_alpha_key;
     entry->scale_key = scale_key;
     entry->last_used_tick = glyph_cache_tick;
     entry->valid = 1;

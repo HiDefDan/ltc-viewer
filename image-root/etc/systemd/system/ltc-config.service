@@ -1,7 +1,5 @@
 [Unit]
 Description=LTC Viewer Configuration Service
-After=network.target
-Before=ltc-timecode.service
 
 [Service]
 Type=simple

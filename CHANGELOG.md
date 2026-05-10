@@ -28,6 +28,18 @@ All notable changes to this project are documented in this file.
 - Gated render/flip work in `main` loop to fresh LTC data (`shared->fresh` path via `got_ltc`).
 - Added config model/default persistence for `transition_fade_ms` in runtime and image payload defaults.
 - Updated source-state fade capture behavior to only framegrab after fade completion, avoiding transition-frame mislabels.
+- Trimmed systemd startup ordering to reduce boot-to-display latency:
+	- removed `Wants=network-online.target` and `After=multi-user.target` from `ltc-timecode.service`
+	- removed `After=network.target` and `Before=ltc-timecode.service` from `ltc-config.service`
+- Fixed intermittent dim glyph rendering after LTC/ToD transitions by including effective alpha in glyph-cache key matching.
+- Applied appliance boot-service slimming on target image/runtime (kept mDNS, cron, NTP):
+	- disabled `bluetooth.service`
+	- disabled `console-setup.service`
+	- disabled `keyboard-setup.service`
+	- disabled `NetworkManager-wait-online.service`
+	- disabled `udisks2.service`
+	- disabled `e2scrub_reap.service`
+	- disabled `rpi-eeprom-update.service`
 
 ### Performance Snapshot (CM5 + Waveshare 8.8 DSI)
 - Baseline (software-rotate era): ~71% CPU, ~35 ms avg_render.
@@ -53,6 +65,11 @@ All notable changes to this project are documented in this file.
 
 - Result: kept `CPUAffinity=3` as the standard service policy (simpler isolation, equal/better render timing in sampled runs).
 - `LTC_FRAMEGRAB_DIR=/path` (via service manager environment) now captures one `ltc-live.bmp` and one `tod-fallback.bmp` from the actual render buffer for offline UX checks.
+- Boot-path improvement from ordering trim + service slimming (cold boot sample):
+	- boot to first display flip improved from `7.784s` to `4.828s` (~`38%` faster)
+	- `ltc-timecode.service` critical-chain activation moved earlier from `@5.447s` to `@2.632s`
+- One-line rollback for the service slimming profile:
+	- `sudo systemctl enable --now bluetooth.service console-setup.service keyboard-setup.service NetworkManager-wait-online.service udisks2.service e2scrub_reap.service rpi-eeprom-update.service`
 
 ## 2026-05-09
 

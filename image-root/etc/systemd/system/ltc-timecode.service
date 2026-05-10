@@ -1,7 +1,5 @@
 [Unit]
 Description=LTC Timecode Reader for Raspberry Pi 5
-After=multi-user.target
-Wants=network-online.target
 
 [Service]
 Type=simple
