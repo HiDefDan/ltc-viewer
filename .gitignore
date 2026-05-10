@@ -23,5 +23,6 @@ src/web-embedded.c
 # local test files
 test/
 
-# local framegrab artifacts
-framegrabs/
+# local framegrab artifacts (track exported BMP captures for review)
+framegrabs/*
+!framegrabs/*.bmp
