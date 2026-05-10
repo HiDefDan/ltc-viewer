@@ -175,6 +175,15 @@ sudo journalctl -u ltc-timecode -n 50
 taskset -cp $(pgrep ltc-timecode)
 chrt -p $(pgrep ltc-timecode)
 
+```
+
+Note:
+- The service may be allowed on CPU 2-3, but the current hot path still tends to
+  stay concentrated on CPU 3 unless the work is split more explicitly.
+- That is acceptable for the current single-process design; treat it as a cue to
+  revisit thread partitioning if CPU 3 remains saturated after future changes.
+
+```bash
 # Throttling
 cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq
 vcgencmd get_throttled
@@ -207,3 +216,8 @@ If RT is selected as release standard, pin explicit RT kernel image in `/boot/fi
 5. Capture and archive a golden image for replication.
 
 `image-root` is designed to match target filesystem paths directly, so image customization tools can copy tree-to-tree without rewriting paths.
+
+## End-of-Day TODO 26/05/09
+
+- Confirm whether the RT kernel path is still desired for the production image.
+- If yes, update this guide with the final kernel selection and any validation notes.

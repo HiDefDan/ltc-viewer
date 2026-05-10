@@ -14,7 +14,7 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ltc-timecode
 
-# Run on isolated CPU core (CPU 3 on Pi 5)
+# Isolate the service to the dedicated render core.
 CPUAffinity=3
 
 # Real-time scheduling — uncomment to enable SCHED_FIFO from systemd

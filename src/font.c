@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <png.h>
 
 /* 7-segment font loader from individual PNG files
@@ -15,6 +16,7 @@
 #define PERIOD_HEIGHT 256
 #define DIGIT_WIDTH 209
 #define DIGIT_HEIGHT 256
+#define FONT_ALPHA_GAMMA 0.90f
 
 /* Individual glyph storage */
 typedef struct {
@@ -26,7 +28,50 @@ typedef struct {
     size_t pixels_size;
 } glyph_t;
 
+typedef struct {
+    int valid;
+    char ch;
+    uint32_t fg_color;
+    uint32_t scale_key;
+    uint32_t scaled_w;
+    uint32_t scaled_h;
+    uint8_t *alpha_map;      /* scaled_w * scaled_h alpha values */
+    uint16_t *row_start;     /* first non-zero alpha x for each row */
+    uint16_t *row_end;       /* one-past-last non-zero alpha x for each row */
+    uint64_t last_used_tick;
+} glyph_cache_entry_t;
+
 static glyph_t glyph_map[11] = {0};  /* 0-9 + period */
+static glyph_cache_entry_t glyph_cache[64] = {0};
+static uint64_t glyph_cache_tick = 0;
+static uint8_t alpha_gamma_lut[256] = {0};
+static int alpha_gamma_lut_ready = 0;
+
+static void init_alpha_gamma_lut(void) {
+    if (alpha_gamma_lut_ready) {
+        return;
+    }
+
+    for (int i = 0; i < 256; i++) {
+        float n = (float)i / 255.0f;
+        float g = powf(n, FONT_ALPHA_GAMMA);
+        int v = (int)lroundf(g * 255.0f);
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        alpha_gamma_lut[i] = (uint8_t)v;
+    }
+    alpha_gamma_lut_ready = 1;
+}
+
+static void free_cache_entry(glyph_cache_entry_t *entry) {
+    if (!entry) {
+        return;
+    }
+    free(entry->alpha_map);
+    free(entry->row_start);
+    free(entry->row_end);
+    memset(entry, 0, sizeof(*entry));
+}
 
 static int load_png_from_file(const char *filename, uint8_t **pixels_out, 
                               uint32_t *width, uint32_t *height) {
@@ -107,6 +152,12 @@ static int load_png_from_file(const char *filename, uint8_t **pixels_out,
 int font_init(void) {
     fflush(stdout);
 
+    init_alpha_gamma_lut();
+
+    for (size_t i = 0; i < (sizeof(glyph_cache) / sizeof(glyph_cache[0])); i++) {
+        free_cache_entry(&glyph_cache[i]);
+    }
+
     /* Load digits 0-9 */
     const char *digit_chars = "0123456789";
     for (int i = 0; i < 10; i++) {
@@ -176,59 +227,224 @@ static glyph_t *font_find_glyph(char ch) {
     return NULL;
 }
 
-static void font_blit_glyph_scaled_internal(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
-                                            uint32_t x, uint32_t y, char ch,
-                                            uint32_t fg_color, float scale) {
+static glyph_cache_entry_t *font_get_cached_glyph(char ch, uint32_t fg_color, float scale) {
     if (scale <= 0.0f) {
         scale = 1.0f;
     }
 
     glyph_t *glyph = font_find_glyph(ch);
     if (!glyph || !glyph->pixels) {
-        return;
+        return NULL;
     }
 
-    uint32_t scaled_w = (uint32_t)(glyph->width * scale + 0.5f);
-    uint32_t scaled_h = (uint32_t)(glyph->height * scale + 0.5f);
-    if (scaled_w == 0 || scaled_h == 0) {
-        return;
+    uint32_t scale_key = (uint32_t)(scale * 10000.0f + 0.5f);
+    glyph_cache_tick++;
+
+    glyph_cache_entry_t *free_slot = NULL;
+    glyph_cache_entry_t *lru_slot = &glyph_cache[0];
+    for (size_t i = 0; i < (sizeof(glyph_cache) / sizeof(glyph_cache[0])); i++) {
+        glyph_cache_entry_t *entry = &glyph_cache[i];
+        if (!entry->valid) {
+            if (!free_slot) {
+                free_slot = entry;
+            }
+            continue;
+        }
+
+        if (entry->ch == ch && entry->fg_color == fg_color && entry->scale_key == scale_key) {
+            entry->last_used_tick = glyph_cache_tick;
+            return entry;
+        }
+
+        if (entry->last_used_tick < lru_slot->last_used_tick) {
+            lru_slot = entry;
+        }
     }
 
-    for (uint32_t row = 0; row < scaled_h && (y + row) < fb_height; row++) {
-        for (uint32_t col = 0; col < scaled_w && (x + col) < fb_width; col++) {
-            uint32_t src_row = (uint32_t)(row / scale);
+    glyph_cache_entry_t *entry = free_slot ? free_slot : lru_slot;
+    free_cache_entry(entry);
+
+    entry->scaled_w = (uint32_t)(glyph->width * scale + 0.5f);
+    entry->scaled_h = (uint32_t)(glyph->height * scale + 0.5f);
+    if (entry->scaled_w == 0 || entry->scaled_h == 0) {
+        return NULL;
+    }
+
+    size_t map_size = (size_t)entry->scaled_w * (size_t)entry->scaled_h;
+    entry->alpha_map = (uint8_t *)calloc(map_size, sizeof(uint8_t));
+    if (!entry->alpha_map) {
+        free_cache_entry(entry);
+        return NULL;
+    }
+
+    entry->row_start = (uint16_t *)calloc((size_t)entry->scaled_h, sizeof(uint16_t));
+    entry->row_end = (uint16_t *)calloc((size_t)entry->scaled_h, sizeof(uint16_t));
+    if (!entry->row_start || !entry->row_end) {
+        free_cache_entry(entry);
+        return NULL;
+    }
+
+    for (uint32_t row = 0; row < entry->scaled_h; row++) {
+        int has_alpha = 0;
+        uint32_t first = 0;
+        uint32_t last = 0;
+
+        uint32_t src_row = (uint32_t)(row / scale);
+        if (src_row >= glyph->height) {
+            src_row = glyph->height - 1;
+        }
+
+        for (uint32_t col = 0; col < entry->scaled_w; col++) {
             uint32_t src_col = (uint32_t)(col / scale);
-            if (src_row >= glyph->height) src_row = glyph->height - 1;
-            if (src_col >= glyph->width) src_col = glyph->width - 1;
+            if (src_col >= glyph->width) {
+                src_col = glyph->width - 1;
+            }
 
             uint8_t gray_val = glyph->pixels[src_row * glyph->width + src_col];
-            if (gray_val > 0) {
-                uint32_t pixel_offset = ((y + row) * (fb_pitch / 4)) + (x + col);
-                uint32_t *pixel_ptr = (uint32_t *)&fb[pixel_offset * 4];
-                
-                /* Alpha blend using grayscale value for smooth antialiasing */
-                float alpha = gray_val / 255.0f;
-                
-                /* Extract foreground RGBA */
-                uint8_t fg_a = (fg_color >> 24) & 0xFF;
-                uint8_t fg_r = (fg_color >> 16) & 0xFF;
-                uint8_t fg_g = (fg_color >> 8) & 0xFF;
-                uint8_t fg_b = fg_color & 0xFF;
-                
-                /* Extract background RGBA */
-                uint32_t bg_color = *pixel_ptr;
-                uint8_t bg_r = (bg_color >> 16) & 0xFF;
-                uint8_t bg_g = (bg_color >> 8) & 0xFF;
-                uint8_t bg_b = bg_color & 0xFF;
-                
-                /* Blend: out = fg * alpha + bg * (1 - alpha) */
-                uint8_t out_r = (uint8_t)(fg_r * alpha + bg_r * (1.0f - alpha));
-                uint8_t out_g = (uint8_t)(fg_g * alpha + bg_g * (1.0f - alpha));
-                uint8_t out_b = (uint8_t)(fg_b * alpha + bg_b * (1.0f - alpha));
-                
-                uint32_t out_color = (0xFF << 24) | (out_r << 16) | (out_g << 8) | out_b;
-                *pixel_ptr = out_color;
+            uint8_t gamma_alpha = alpha_gamma_lut[gray_val];
+            entry->alpha_map[(size_t)row * entry->scaled_w + col] = gamma_alpha;
+            if (gamma_alpha > 0) {
+                if (!has_alpha) {
+                    first = col;
+                    has_alpha = 1;
+                }
+                last = col + 1;
             }
+        }
+
+        if (has_alpha) {
+            entry->row_start[row] = (uint16_t)first;
+            entry->row_end[row] = (uint16_t)last;
+        } else {
+            entry->row_start[row] = 0;
+            entry->row_end[row] = 0;
+        }
+    }
+
+    entry->ch = ch;
+    entry->fg_color = fg_color & 0x00FFFFFFu;
+    entry->scale_key = scale_key;
+    entry->last_used_tick = glyph_cache_tick;
+    entry->valid = 1;
+    return entry;
+}
+
+static inline uint32_t blend_over_rgb(uint32_t bg_color, uint32_t fg_rgb, uint8_t alpha) {
+    if (alpha == 255) {
+        return 0xFF000000u | fg_rgb;
+    }
+    if (alpha == 0) {
+        return bg_color;
+    }
+
+    uint32_t inv = 255u - (uint32_t)alpha;
+
+    uint32_t bg_r = (bg_color >> 16) & 0xFFu;
+    uint32_t bg_g = (bg_color >> 8) & 0xFFu;
+    uint32_t bg_b = bg_color & 0xFFu;
+
+    uint32_t fg_r = (fg_rgb >> 16) & 0xFFu;
+    uint32_t fg_g = (fg_rgb >> 8) & 0xFFu;
+    uint32_t fg_b = fg_rgb & 0xFFu;
+
+    uint32_t out_r = (fg_r * alpha + bg_r * inv + 127u) / 255u;
+    uint32_t out_g = (fg_g * alpha + bg_g * inv + 127u) / 255u;
+    uint32_t out_b = (fg_b * alpha + bg_b * inv + 127u) / 255u;
+
+    return 0xFF000000u | (out_r << 16) | (out_g << 8) | out_b;
+}
+
+static void font_blit_glyph_scaled_internal(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
+                                            uint32_t x, uint32_t y, char ch,
+                                            uint32_t fg_color, float scale) {
+    glyph_cache_entry_t *entry = font_get_cached_glyph(ch, fg_color, scale);
+    if (!entry || entry->scaled_w == 0 || entry->scaled_h == 0 || fb_pitch < 4) {
+        return;
+    }
+
+    uint32_t stride = fb_pitch / 4;
+    uint32_t fg_rgb = entry->fg_color;
+    for (uint32_t row = 0; row < entry->scaled_h; row++) {
+        uint32_t dst_y = y + row;
+        if (dst_y >= fb_height) {
+            break;
+        }
+
+        uint32_t start = entry->row_start[row];
+        uint32_t end = entry->row_end[row];
+        if (end <= start) {
+            continue;
+        }
+
+        for (uint32_t col = start; col < end; col++) {
+            uint32_t dst_x = x + col;
+            if (dst_x >= fb_width) {
+                break;
+            }
+            uint8_t alpha = entry->alpha_map[(size_t)row * entry->scaled_w + col];
+            if (alpha == 0) {
+                continue;
+            }
+
+            size_t idx = (size_t)dst_y * stride + dst_x;
+            uint32_t *dst_px = &((uint32_t *)fb)[idx];
+            *dst_px = blend_over_rgb(*dst_px, fg_rgb, alpha);
+        }
+    }
+}
+
+static void font_blit_glyph_scaled_internal_rot90ccw(uint8_t *fb,
+                                                     uint32_t fb_width,
+                                                     uint32_t fb_height,
+                                                     uint32_t fb_pitch,
+                                                     uint32_t logical_width,
+                                                     uint32_t logical_height,
+                                                     uint32_t x,
+                                                     uint32_t y,
+                                                     char ch,
+                                                     uint32_t fg_color,
+                                                     float scale) {
+    glyph_cache_entry_t *entry = font_get_cached_glyph(ch, fg_color, scale);
+    if (!entry || entry->scaled_w == 0 || entry->scaled_h == 0 ||
+        fb_pitch < 4 || logical_width == 0 || logical_height == 0) {
+        return;
+    }
+
+    uint32_t stride = fb_pitch / 4;
+    uint32_t fg_rgb = entry->fg_color;
+
+    for (uint32_t row = 0; row < entry->scaled_h; row++) {
+        uint32_t logical_y = y + row;
+        if (logical_y >= logical_height) {
+            break;
+        }
+
+        uint32_t start = entry->row_start[row];
+        uint32_t end = entry->row_end[row];
+        if (end <= start) {
+            continue;
+        }
+
+        for (uint32_t col = start; col < end; col++) {
+            uint32_t logical_x = x + col;
+            if (logical_x >= logical_width) {
+                break;
+            }
+
+            uint8_t alpha = entry->alpha_map[(size_t)row * entry->scaled_w + col];
+            if (alpha == 0) {
+                continue;
+            }
+
+            uint32_t phys_x = logical_y;
+            uint32_t phys_y = logical_width - 1 - logical_x;
+            if (phys_x >= fb_width || phys_y >= fb_height) {
+                continue;
+            }
+
+            uint32_t pixel_offset = (phys_y * stride) + phys_x;
+            uint32_t *dst_px = &((uint32_t *)fb)[pixel_offset];
+            *dst_px = blend_over_rgb(*dst_px, fg_rgb, alpha);
         }
     }
 }
@@ -296,4 +512,66 @@ void font_blit_string_scaled(uint8_t *fb, uint32_t fb_width, uint32_t fb_height,
         /* Advance cursor by spacing_width */
         cur_x += scaled_spacing;
     }
+}
+
+void font_blit_string_scaled_rot90ccw(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
+                                      uint32_t logical_width, uint32_t logical_height,
+                                      uint32_t x, uint32_t y, const char *text,
+                                      uint32_t fg_color, float scale) {
+    if (scale <= 0.0f) {
+        scale = 1.0f;
+    }
+
+    uint32_t cur_x = x;
+    uint32_t prev_x = x;
+
+    for (const char *p = text; *p; p++) {
+        char ch = *p;
+
+        glyph_t *glyph = font_find_glyph(ch);
+        if (!glyph || !glyph->pixels) {
+            continue;
+        }
+
+        uint32_t scaled_width = (uint32_t)(glyph->width * scale + 0.5f);
+        uint32_t scaled_spacing = (uint32_t)(glyph->spacing_width * scale + 0.5f);
+        if (scaled_spacing == 0 && glyph->spacing_width > 0) {
+            scaled_spacing = 1;
+        }
+        uint32_t period_lift = (uint32_t)(scale + 0.5f);
+
+        uint32_t draw_x = cur_x;
+        uint32_t draw_y = y;
+        if (ch == '.') {
+            draw_x = prev_x;
+            draw_y = (y > period_lift) ? (y - period_lift) : y;
+        }
+
+        if (draw_x + scaled_width > logical_width) {
+            break;
+        }
+
+        font_blit_glyph_scaled_internal_rot90ccw(fb, fb_width, fb_height, fb_pitch,
+                                                 logical_width, logical_height,
+                                                 draw_x, draw_y, ch,
+                                                 fg_color, scale);
+
+        if (ch != '.') {
+            prev_x = cur_x;
+        }
+
+        cur_x += scaled_spacing;
+    }
+}
+
+void font_blit_background_scaled_rot90ccw(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
+                                          uint32_t logical_width, uint32_t logical_height,
+                                          uint32_t x, uint32_t y, float scale) {
+    uint32_t glyph_color = 0xFF0A0A0A;
+    const char *bg_pattern = "8.8.8.8.8.8.8.8.";
+
+    font_blit_string_scaled_rot90ccw(fb, fb_width, fb_height, fb_pitch,
+                                     logical_width, logical_height,
+                                     x, y, bg_pattern,
+                                     glyph_color, scale);
 }

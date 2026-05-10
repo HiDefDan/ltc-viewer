@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +30,7 @@ typedef struct {
     ltc_frame_t frame;
     int         fresh;      /* 1 = new frame since last main-thread read */
     time_t      last_seen;
+    uint64_t    ingest_mono_ns;
     uint64_t    frame_mono_ns;
 } ltc_shared_t;
 
@@ -52,6 +54,10 @@ static int ltc_rtaudio_callback(void *out, void *in, unsigned int nframes,
     if (!in || nframes == 0) return 0;
     const int16_t *pcm = (const int16_t *)in;
 
+    struct timespec ts_ingest;
+    clock_gettime(CLOCK_MONOTONIC, &ts_ingest);
+    uint64_t ingest_ns = (uint64_t)ts_ingest.tv_sec * 1000000000ULL + (uint64_t)ts_ingest.tv_nsec;
+
     /* Feed and decode outside the shared mutex — decoder is only ever
      * touched from this single callback thread. */
     ltc_feed_audio(ctx->decoder, pcm, nframes, 1);
@@ -67,6 +73,7 @@ static int ltc_rtaudio_callback(void *out, void *in, unsigned int nframes,
         ctx->shared->frame     = decoded;
         ctx->shared->fresh     = 1;
         ctx->shared->last_seen = time(NULL);
+        ctx->shared->ingest_mono_ns = ingest_ns;
         ctx->shared->frame_mono_ns = mono_ns;
         pthread_mutex_unlock(ctx->shared_mutex);
     }
@@ -97,37 +104,10 @@ static unsigned int rta_find_hifiberry_input(rtaudio_t rta)
     printf("[RTA] Using default input device id=%u\n", def ? def : fallback);
     return def ? def : fallback;
 }
-
-
-
-/*
- * Rotate a landscape ARGB8888 image (src_w x src_h) into a portrait
- * destination buffer (dst_w=src_h, dst_h=src_w), 90 degrees counter-clockwise.
- */
-static void rotate_argb8888_90ccw(const uint8_t *src,
-                                  uint32_t src_w,
-                                  uint32_t src_h,
-                                  uint32_t src_pitch,
-                                  uint8_t *dst,
-                                  uint32_t dst_pitch) {
-    const uint32_t *src32 = (const uint32_t *)src;
-    uint32_t *dst32 = (uint32_t *)dst;
-    uint32_t src_stride = src_pitch / 4;
-    uint32_t dst_stride = dst_pitch / 4;
-
-    for (uint32_t y = 0; y < src_h; y++) {
-        for (uint32_t x = 0; x < src_w; x++) {
-            uint32_t pixel = src32[y * src_stride + x];
-            uint32_t dx = y;
-            uint32_t dy = src_w - 1 - x;
-            dst32[dy * dst_stride + dx] = pixel;
-        }
-    }
-}
-
 /* Draw a tiny lowercase-style "df" badge using only the period glyph.
  * This keeps the overlay within the existing glyph set (digits + period). */
 static void draw_df_badge(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
+                          uint32_t logical_width, uint32_t logical_height, int portrait_mode,
                           uint32_t x, uint32_t y, uint32_t color, float dot_scale)
 {
     static const int d_pts[][2] = {
@@ -153,14 +133,61 @@ static void draw_df_badge(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, ui
     for (size_t i = 0; i < sizeof(d_pts)/sizeof(d_pts[0]); i++) {
         uint32_t px = x + (uint32_t)d_pts[i][0] * step;
         uint32_t py = y + (uint32_t)d_pts[i][1] * step;
-        font_blit_string_scaled(fb, fb_width, fb_height, fb_pitch, px, py, ".", color, dot_scale);
+        if (portrait_mode) {
+            font_blit_string_scaled_rot90ccw(fb, fb_width, fb_height, fb_pitch,
+                                             logical_width, logical_height,
+                                             px, py, ".", color, dot_scale);
+        } else {
+            font_blit_string_scaled(fb, fb_width, fb_height, fb_pitch, px, py, ".", color, dot_scale);
+        }
     }
 
     uint32_t fx0 = x + 4 * step;
     for (size_t i = 0; i < sizeof(f_pts)/sizeof(f_pts[0]); i++) {
         uint32_t px = fx0 + (uint32_t)f_pts[i][0] * step;
         uint32_t py = y + (uint32_t)f_pts[i][1] * step;
-        font_blit_string_scaled(fb, fb_width, fb_height, fb_pitch, px, py, ".", color, dot_scale);
+        if (portrait_mode) {
+            font_blit_string_scaled_rot90ccw(fb, fb_width, fb_height, fb_pitch,
+                                             logical_width, logical_height,
+                                             px, py, ".", color, dot_scale);
+        } else {
+            font_blit_string_scaled(fb, fb_width, fb_height, fb_pitch, px, py, ".", color, dot_scale);
+        }
+    }
+}
+
+static void copy_argb_rect(uint8_t *dst,
+                           const uint8_t *src,
+                           uint32_t fb_width,
+                           uint32_t fb_height,
+                           uint32_t pitch,
+                           int32_t x,
+                           int32_t y,
+                           int32_t w,
+                           int32_t h)
+{
+    if (!dst || !src || pitch < 4 || w <= 0 || h <= 0) {
+        return;
+    }
+
+    int32_t x0 = x;
+    int32_t y0 = y;
+    int32_t x1 = x + w;
+    int32_t y1 = y + h;
+
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int32_t)fb_width) x1 = (int32_t)fb_width;
+    if (y1 > (int32_t)fb_height) y1 = (int32_t)fb_height;
+    if (x1 <= x0 || y1 <= y0) {
+        return;
+    }
+
+    size_t row_bytes = (size_t)(x1 - x0) * 4u;
+    uint32_t stride = pitch / 4;
+    for (int32_t row = y0; row < y1; row++) {
+        size_t off = ((size_t)row * (size_t)stride + (size_t)x0) * 4u;
+        memcpy(dst + off, src + off, row_bytes);
     }
 }
 
@@ -217,6 +244,19 @@ int main(int argc, char *argv[]) {
     /* Set up signal handlers */
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+
+    /* Pin main thread to isolated core 3 when available. */
+    {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(3, &cpuset);
+        if (sched_setaffinity(0, sizeof(cpuset), &cpuset) != 0) {
+            fprintf(stderr, "[MAIN] Warning: Failed to pin main thread to CPU 3\n");
+            perror("[MAIN] sched_setaffinity");
+        } else {
+            printf("[MAIN] Main thread pinned to CPU 3\n");
+        }
+    }
 
     /* Enable real-time scheduling (SCHED_FIFO priority 50) */
     struct sched_param param = {0};
@@ -361,19 +401,36 @@ int main(int argc, char *argv[]) {
     /* Main render loop */
     uint64_t frame_count = 0;
     time_t last_time_display = 0;
-    uint8_t *staging_buffer = NULL;
-    size_t staging_size = 0;
-    int logged_portrait_comp = 0;
+    int logged_portrait_direct = 0;
+    uint8_t *static_layer_buffer = NULL;
+    size_t static_layer_size = 0;
+    int static_layer_valid = 0;
+    uint32_t static_fb_width = 0;
+    uint32_t static_fb_height = 0;
+    uint32_t static_render_pitch = 0;
+    uint32_t static_render_width = 0;
+    uint32_t static_render_height = 0;
+    int static_portrait_mode = 0;
+    uint32_t static_bg_color = 0;
+    uint32_t static_bg_x = 0;
+    uint32_t static_text_y = 0;
+    uint32_t static_glyph_scale_key = 0;
 
     /* Option A: dirty-suppression tracking */
     char prev_timecode_str[32] = {0};
     uint64_t render_op_count = 0;   /* renders performed in current 5-s window */
     uint64_t skip_count = 0;        /* frames skipped (identical timecode) */
     uint64_t total_render_ns = 0;   /* accumulated render time (ns) */
-    uint64_t total_latency_ms = 0;  /* accumulated decode->display latency (ms) */
-    uint64_t latency_samples = 0;   /* latency samples in current 5-s window */
+    uint64_t total_latency_us = 0;  /* accumulated decode->display latency (us) */
+    uint64_t latency_samples = 0;   /* decode->display samples in current 5-s window */
+    uint64_t total_ingest_to_decode_us = 0;   /* accumulated ADC ingest->decode latency (us) */
+    uint64_t ingest_to_decode_samples = 0;
+    uint64_t total_ingest_to_display_us = 0;  /* accumulated ADC ingest->display latency (us) */
+    uint64_t ingest_to_display_samples = 0;
+    uint64_t last_render_mono_ns = 0;
     ltc_frame_t last_ltc_frame = {0};
     ltc_frame_t target_ltc_frame = {0};
+    uint64_t target_ltc_ingest_ns = 0;
     uint64_t target_ltc_mono_ns = 0;
     int has_ltc_frame = 0;
     int has_target_ltc_frame = 0;
@@ -447,28 +504,13 @@ int main(int argc, char *argv[]) {
          */
         uint32_t render_width = portrait_mode ? fb_height : fb_width;
         uint32_t render_height = portrait_mode ? fb_width : fb_height;
-        uint32_t render_pitch = portrait_mode ? (render_width * 4) : g_drm.back.pitch;
-
+        uint32_t render_pitch = g_drm.back.pitch;
         uint8_t *render_buffer = back_buffer;
-        if (portrait_mode) {
-            size_t needed = (size_t)render_pitch * (size_t)render_height;
-            if (staging_size != needed) {
-                uint8_t *new_buf = (uint8_t *)realloc(staging_buffer, needed);
-                if (!new_buf) {
-                    fprintf(stderr, "[MAIN] Failed to allocate portrait staging buffer (%zu bytes)\n", needed);
-                    break;
-                }
-                staging_buffer = new_buf;
-                staging_size = needed;
-            }
-            render_buffer = staging_buffer;
-
-            if (!logged_portrait_comp) {
-                printf("[MAIN] Portrait mode detected (%ux%u). Using logical render %ux%u with 90deg compensation.\n",
-                       fb_width, fb_height, render_width, render_height);
-                fflush(stdout);
-                logged_portrait_comp = 1;
-            }
+        if (portrait_mode && !logged_portrait_direct) {
+            printf("[MAIN] Portrait mode detected (%ux%u). Rendering directly with logical canvas %ux%u (no full-frame rotate).\n",
+                   fb_width, fb_height, render_width, render_height);
+            fflush(stdout);
+            logged_portrait_direct = 1;
         }
 
         float base_scale_x = (float)render_width / (float)DISPLAY_WIDTH;
@@ -508,11 +550,13 @@ int main(int argc, char *argv[]) {
          */
         /* Collect LTC frame decoded by capture thread. Mutex held < 1us. */
         ltc_frame_t live_ltc_frame = {0};
+        uint64_t live_ltc_ingest_ns = 0;
         uint64_t live_ltc_mono_ns = 0;
         int got_ltc = 0;
         pthread_mutex_lock(&ltc_mutex);
         if (ltc_shared.fresh) {
             live_ltc_frame = ltc_shared.frame;
+            live_ltc_ingest_ns = ltc_shared.ingest_mono_ns;
             live_ltc_mono_ns = ltc_shared.frame_mono_ns;
             ltc_shared.fresh = 0;
             got_ltc = 1;
@@ -527,6 +571,7 @@ int main(int argc, char *argv[]) {
             has_ltc_frame = 1;
             last_ltc_seen = now;
             target_ltc_frame = live_ltc_frame;
+            target_ltc_ingest_ns = live_ltc_ingest_ns;
             target_ltc_mono_ns = live_ltc_mono_ns;
             has_target_ltc_frame = 1;
             if (!smooth_clock_init) {
@@ -546,6 +591,7 @@ int main(int argc, char *argv[]) {
                  * display returns to ToD/green instead of holding stale frame. */
                 has_ltc_frame = 0;
                 has_target_ltc_frame = 0;
+                target_ltc_ingest_ns = 0;
                 target_ltc_mono_ns = 0;
                 smooth_budget_frames = 0.0;
                 ltc_frame_to_string_with_tz(&last_ltc_frame, tm_local, timecode_str, sizeof(timecode_str));
@@ -610,8 +656,31 @@ int main(int argc, char *argv[]) {
         /* Consider LTC live for one second after the latest decoded frame. */
         int ltc_live = has_ltc_frame && ((now - last_ltc_seen) <= 1);
 
-        /* Option A: skip render and flip entirely when timecode is unchanged */
-        int need_render = (strcmp(timecode_str, prev_timecode_str) != 0);
+        /* Only render/flip on fresh LTC data, and only when visible text changed. */
+        int need_render = got_ltc && (strcmp(timecode_str, prev_timecode_str) != 0);
+        if (need_render) {
+            struct timespec ts_now_mono;
+            clock_gettime(CLOCK_MONOTONIC, &ts_now_mono);
+            uint64_t now_mono_ns = (uint64_t)ts_now_mono.tv_sec * 1000000000ULL + (uint64_t)ts_now_mono.tv_nsec;
+
+            uint64_t min_interval_ns;
+            if (ltc_live) {
+                float cadence_fps = detected_ltc_fps;
+                if (cadence_fps < 10.0f || cadence_fps > 120.0f) {
+                    cadence_fps = (float)(nominal_ltc_fps ? nominal_ltc_fps : LTC_FRAME_RATE);
+                }
+                if (cadence_fps < 1.0f) {
+                    cadence_fps = (float)LTC_FRAME_RATE;
+                }
+                min_interval_ns = (uint64_t)(1000000000.0 / (double)cadence_fps);
+            } else {
+                min_interval_ns = 10000000ULL; /* centisecond fallback */
+            }
+
+            if (last_render_mono_ns > 0 && (now_mono_ns - last_render_mono_ns) < min_interval_ns) {
+                need_render = 0;
+            }
+        }
         if (need_render) {
             memcpy(prev_timecode_str, timecode_str, sizeof(prev_timecode_str));
 
@@ -622,13 +691,6 @@ int main(int argc, char *argv[]) {
             uint32_t bg_color = ((current_config.bg_color_r << 16) |
                                  (current_config.bg_color_g << 8) |
                                  (current_config.bg_color_b));
-
-            /* Clear framebuffer to configured background color */
-            uint32_t *fb32 = (uint32_t *)render_buffer;
-            uint32_t pixels = (render_pitch / 4) * render_height;
-            for (uint32_t i = 0; i < pixels; i++) {
-                fb32[i] = bg_color;
-            }
 
             /* Calculate scaled glyph height for vertical centering */
             uint32_t scaled_glyph_height = (uint32_t)(FONT_GLYPH_HEIGHT * glyph_scale + 0.5f);
@@ -688,9 +750,76 @@ int main(int argc, char *argv[]) {
             uint32_t bg_x = ((uint32_t)text_x_final > scaled_digit_width) ?
                 ((uint32_t)text_x_final - scaled_digit_width) : 0;
 
-            /* Render background layer (unlit 7-segment grid) */
-            font_blit_background_scaled(render_buffer, render_width, render_height, render_pitch,
-                            bg_x, text_y_final, glyph_scale);
+            /* Cache static scene: solid background + unlit 7-segment layer. */
+            uint32_t glyph_scale_key = (uint32_t)(glyph_scale * 10000.0f + 0.5f);
+            size_t required_static_size = (size_t)render_pitch * (size_t)fb_height;
+            int static_layer_needs_rebuild = !static_layer_valid ||
+                static_fb_width != fb_width ||
+                static_fb_height != fb_height ||
+                static_render_pitch != render_pitch ||
+                static_render_width != render_width ||
+                static_render_height != render_height ||
+                static_portrait_mode != portrait_mode ||
+                static_bg_color != bg_color ||
+                static_bg_x != bg_x ||
+                static_text_y != (uint32_t)text_y_final ||
+                static_glyph_scale_key != glyph_scale_key;
+
+            if (static_layer_size != required_static_size) {
+                uint8_t *new_static = (uint8_t *)realloc(static_layer_buffer, required_static_size);
+                if (!new_static) {
+                    fprintf(stderr, "[MAIN] Failed to allocate static layer buffer (%zu bytes)\n",
+                            required_static_size);
+                    break;
+                }
+                static_layer_buffer = new_static;
+                static_layer_size = required_static_size;
+                static_layer_needs_rebuild = 1;
+            }
+
+            if (static_layer_needs_rebuild) {
+                uint32_t *static_fb32 = (uint32_t *)static_layer_buffer;
+                uint32_t static_pixels = (render_pitch / 4) * fb_height;
+                for (uint32_t i = 0; i < static_pixels; i++) {
+                    static_fb32[i] = bg_color;
+                }
+
+                if (portrait_mode) {
+                    font_blit_background_scaled_rot90ccw(static_layer_buffer, fb_width, fb_height, render_pitch,
+                                                         render_width, render_height,
+                                                         bg_x, text_y_final, glyph_scale);
+                } else {
+                    font_blit_background_scaled(static_layer_buffer, render_width, render_height, render_pitch,
+                                                bg_x, text_y_final, glyph_scale);
+                }
+
+                static_layer_valid = 1;
+                static_fb_width = fb_width;
+                static_fb_height = fb_height;
+                static_render_pitch = render_pitch;
+                static_render_width = render_width;
+                static_render_height = render_height;
+                static_portrait_mode = portrait_mode;
+                static_bg_color = bg_color;
+                static_bg_x = bg_x;
+                static_text_y = (uint32_t)text_y_final;
+                static_glyph_scale_key = glyph_scale_key;
+            }
+
+            /* Restore from static cache:
+             * - full frame on static rebuilds, debug overlay mode, or landscape fallback
+             * - otherwise just the dynamic timecode bounding region */
+            if (static_layer_needs_rebuild || current_config.debug_overlay_enabled || !portrait_mode) {
+                memcpy(render_buffer, static_layer_buffer, static_layer_size);
+            } else {
+                int32_t dirty_x = text_y_final;
+                int32_t dirty_y = (int32_t)render_width - (text_x_final + (int32_t)scaled_string_width);
+                int32_t dirty_w = (int32_t)scaled_glyph_height;
+                int32_t dirty_h = (int32_t)scaled_string_width;
+                copy_argb_rect(render_buffer, static_layer_buffer,
+                               fb_width, fb_height, render_pitch,
+                               dirty_x, dirty_y, dirty_w, dirty_h);
+            }
 
             /* Render timecode */
             uint32_t text_x = (uint32_t)text_x_final;
@@ -705,9 +834,16 @@ int main(int argc, char *argv[]) {
                               (current_config.color_b));
             }
 
-            font_blit_string_scaled(render_buffer, render_width, render_height, render_pitch,
-                        text_x, text_y, timecode_str,
-                        text_color, glyph_scale);
+            if (portrait_mode) {
+                font_blit_string_scaled_rot90ccw(render_buffer, fb_width, fb_height, render_pitch,
+                                                 render_width, render_height,
+                                                 text_x, text_y, timecode_str,
+                                                 text_color, glyph_scale);
+            } else {
+                font_blit_string_scaled(render_buffer, render_width, render_height, render_pitch,
+                                        text_x, text_y, timecode_str,
+                                        text_color, glyph_scale);
+            }
 
             if (current_config.debug_overlay_enabled) {
                 /* Compact overlay: measured_fps.nominal_fps.expected_fps.gap_mod_100
@@ -737,28 +873,28 @@ int main(int argc, char *argv[]) {
                 uint32_t overlay_y = 12;
                 uint32_t overlay_color = (nominal_ltc_fps != 0 && nominal_ltc_fps != expected_fps)
                     ? 0x00FF8800 : 0x00FFFF00;
-                font_blit_string_scaled(render_buffer, render_width, render_height, render_pitch,
-                                        overlay_x, overlay_y, overlay_str,
-                                        overlay_color, overlay_scale);
+                if (portrait_mode) {
+                    font_blit_string_scaled_rot90ccw(render_buffer, fb_width, fb_height, render_pitch,
+                                                     render_width, render_height,
+                                                     overlay_x, overlay_y, overlay_str,
+                                                     overlay_color, overlay_scale);
+                } else {
+                    font_blit_string_scaled(render_buffer, render_width, render_height, render_pitch,
+                                            overlay_x, overlay_y, overlay_str,
+                                            overlay_color, overlay_scale);
+                }
 
                 if (df_flag) {
                     uint32_t df_x = overlay_x + (uint32_t)(16.0f * DISPLAY_DIGIT_WIDTH * overlay_scale);
-                    draw_df_badge(render_buffer, render_width, render_height, render_pitch,
+                    draw_df_badge(render_buffer, fb_width, fb_height, render_pitch,
+                                  render_width, render_height, portrait_mode,
                                   df_x, overlay_y,
                                   overlay_color, overlay_scale * 0.72f);
                 }
             }
 
-            if (portrait_mode) {
-                rotate_argb8888_90ccw(render_buffer,
-                                      render_width,
-                                      render_height,
-                                      render_pitch,
-                                      back_buffer,
-                                      g_drm.back.pitch);
-            }
-
             clock_gettime(CLOCK_MONOTONIC, &t_render_end);
+            last_render_mono_ns = (uint64_t)t_render_end.tv_sec * 1000000000ULL + (uint64_t)t_render_end.tv_nsec;
             total_render_ns += (uint64_t)(t_render_end.tv_sec - t_render_start.tv_sec) * 1000000000ULL
                              + (uint64_t)(t_render_end.tv_nsec - t_render_start.tv_nsec);
             render_op_count++;
@@ -766,8 +902,18 @@ int main(int argc, char *argv[]) {
             if (ltc_live && target_ltc_mono_ns > 0) {
                 uint64_t now_mono_ns = (uint64_t)t_render_end.tv_sec * 1000000000ULL + (uint64_t)t_render_end.tv_nsec;
                 if (now_mono_ns >= target_ltc_mono_ns) {
-                    total_latency_ms += (now_mono_ns - target_ltc_mono_ns) / 1000000ULL;
+                    total_latency_us += (now_mono_ns - target_ltc_mono_ns) / 1000ULL;
                     latency_samples++;
+                }
+
+                if (target_ltc_ingest_ns > 0 && target_ltc_mono_ns >= target_ltc_ingest_ns) {
+                    total_ingest_to_decode_us += (target_ltc_mono_ns - target_ltc_ingest_ns) / 1000ULL;
+                    ingest_to_decode_samples++;
+                }
+
+                if (target_ltc_ingest_ns > 0 && now_mono_ns >= target_ltc_ingest_ns) {
+                    total_ingest_to_display_us += (now_mono_ns - target_ltc_ingest_ns) / 1000ULL;
+                    ingest_to_display_samples++;
                 }
             }
 
@@ -795,22 +941,62 @@ int main(int argc, char *argv[]) {
         if ((frame_count % (5 * g_drm.mode_vrefresh)) == 0) {
             uint64_t avg_us = render_op_count > 0
                 ? total_render_ns / render_op_count / 1000 : 0;
-            uint64_t avg_latency_ms = latency_samples > 0
-                ? total_latency_ms / latency_samples : 0;
+            uint64_t avg_decode_to_display_us = latency_samples > 0
+                ? total_latency_us / latency_samples : 0;
+            uint64_t avg_ingest_to_decode_us = ingest_to_decode_samples > 0
+                ? total_ingest_to_decode_us / ingest_to_decode_samples : 0;
+            uint64_t avg_ingest_to_display_us = ingest_to_display_samples > 0
+                ? total_ingest_to_display_us / ingest_to_display_samples : 0;
             printf("[MAIN] Frame %" PRIu64 ", TC: %s | rendered=%" PRIu64
-                   " skipped=%" PRIu64 " avg_render=%" PRIu64 "us ltc_fps=%.2f disp_lat=%" PRIu64 "ms\n",
-                   frame_count, timecode_str, render_op_count, skip_count, avg_us, detected_ltc_fps, avg_latency_ms);
+                   " skipped=%" PRIu64 " avg_render=%" PRIu64 "us ltc_fps=%.2f "
+                   "adc_dec_lat_us=%" PRIu64 " dec_disp_lat_us=%" PRIu64 " adc_disp_lat_us=%" PRIu64 "\n",
+                   frame_count, timecode_str, render_op_count, skip_count, avg_us, detected_ltc_fps,
+                   avg_ingest_to_decode_us, avg_decode_to_display_us, avg_ingest_to_display_us);
             fflush(stdout);
             render_op_count = 0;
             skip_count = 0;
             total_render_ns = 0;
-            total_latency_ms = 0;
+            total_latency_us = 0;
             latency_samples = 0;
+            total_ingest_to_decode_us = 0;
+            ingest_to_decode_samples = 0;
+            total_ingest_to_display_us = 0;
+            ingest_to_display_samples = 0;
         }
 
-        /* Yield CPU briefly */
-        struct timespec ts = {0, 100000};  /* 100 µs */
-        nanosleep(&ts, NULL);
+        /* Adaptive pacing to avoid busy-spin when content is unchanged. */
+        {
+            uint64_t target_period_ns;
+            if (ltc_live) {
+                float cadence_fps = detected_ltc_fps;
+                if (cadence_fps < 10.0f || cadence_fps > 120.0f) {
+                    cadence_fps = (float)(nominal_ltc_fps ? nominal_ltc_fps : LTC_FRAME_RATE);
+                }
+                if (cadence_fps < 1.0f) {
+                    cadence_fps = (float)LTC_FRAME_RATE;
+                }
+                target_period_ns = (uint64_t)(1000000000.0 / (double)cadence_fps);
+            } else {
+                /* ToD fallback includes centiseconds, so target 100 Hz updates. */
+                target_period_ns = 10000000ULL;
+            }
+
+            uint64_t sleep_ns = need_render ? (target_period_ns / 10ULL) : (target_period_ns / 4ULL);
+
+            /* Keep checks responsive for config updates and LTC lock changes. */
+            if (sleep_ns < 500000ULL) {
+                sleep_ns = 500000ULL;      /* 0.5 ms min */
+            }
+            if (sleep_ns > 8000000ULL) {
+                sleep_ns = 8000000ULL;     /* 8 ms max */
+            }
+
+            struct timespec ts_sleep = {
+                .tv_sec = (time_t)(sleep_ns / 1000000000ULL),
+                .tv_nsec = (long)(sleep_ns % 1000000000ULL)
+            };
+            nanosleep(&ts_sleep, NULL);
+        }
     }
 
     printf("[MAIN] Shutting down...\n");
@@ -825,7 +1011,7 @@ int main(int argc, char *argv[]) {
     }
     pthread_mutex_destroy(&ltc_mutex);
     ltc_decoder_cleanup(&ltc);
-    free(staging_buffer);
+    free(static_layer_buffer);
     config_watcher_cleanup(&config_watcher);
     drm_cleanup(&g_drm);
 

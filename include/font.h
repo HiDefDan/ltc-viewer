@@ -32,6 +32,12 @@ void font_blit_background(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, ui
 void font_blit_background_scaled(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
                                  uint32_t x, uint32_t y, float scale);
 
+/* Render background layer while mapping from a logical landscape canvas
+   into a physical portrait framebuffer (90 deg counter-clockwise). */
+void font_blit_background_scaled_rot90ccw(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
+                                          uint32_t logical_width, uint32_t logical_height,
+                                          uint32_t x, uint32_t y, float scale);
+
 /* Render a single glyph to ARGB8888 framebuffer at (x, y).
    Only bright pixels (> 128) are written; dark pixels are skipped. */
 void font_blit_glyph(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
@@ -48,5 +54,12 @@ void font_blit_string(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32
 void font_blit_string_scaled(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
                              uint32_t x, uint32_t y, const char *text,
                              uint32_t fg_color, float scale);
+
+/* Render string while mapping from a logical landscape canvas
+   into a physical portrait framebuffer (90 deg counter-clockwise). */
+void font_blit_string_scaled_rot90ccw(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
+                                      uint32_t logical_width, uint32_t logical_height,
+                                      uint32_t x, uint32_t y, const char *text,
+                                      uint32_t fg_color, float scale);
 
 #endif /* FONT_H */
