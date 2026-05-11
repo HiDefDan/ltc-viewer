@@ -22,6 +22,8 @@
 
 static volatile int should_exit = 0;
 static ltc_drm_context_t g_drm;
+static volatile uint64_t g_rta_input_overflow = 0;
+static volatile uint64_t g_rta_output_underflow = 0;
 
 /* Shared state written by capture thread, read by main thread.
  * Protected by a mutex that is held only for a memcpy — never during DRM renders
@@ -32,6 +34,8 @@ typedef struct {
     time_t      last_seen;
     uint64_t    ingest_mono_ns;
     uint64_t    frame_mono_ns;
+    uint64_t    frame_start_est_ns;
+    uint64_t    frame_end_est_ns;
 } ltc_shared_t;
 
 typedef struct {
@@ -41,6 +45,31 @@ typedef struct {
     pthread_mutex_t *shared_mutex;
 } rtaudio_ctx_t;
 
+static unsigned int read_env_u32(const char *name,
+                                 unsigned int fallback,
+                                 unsigned int min_v,
+                                 unsigned int max_v)
+{
+    const char *s = getenv(name);
+    if (!s || !*s) {
+        return fallback;
+    }
+
+    char *end = NULL;
+    unsigned long parsed = strtoul(s, &end, 10);
+    if (end == s || *end != '\0') {
+        return fallback;
+    }
+
+    if (parsed < min_v) {
+        parsed = min_v;
+    }
+    if (parsed > max_v) {
+        parsed = max_v;
+    }
+    return (unsigned int)parsed;
+}
+
 /* RtAudio input callback — runs in RtAudio's internal callback thread.
  * Receives SINT16 mono frames directly from HiFiBerry ADC.
  * No bit-shifting or channel extraction: RtAudio opens the device as
@@ -49,7 +78,14 @@ static int ltc_rtaudio_callback(void *out, void *in, unsigned int nframes,
                                 double stream_time, rtaudio_stream_status_t status,
                                 void *userdata)
 {
-    (void)out; (void)stream_time; (void)status;
+    (void)out;
+    (void)stream_time;
+    if (status & RTAUDIO_STATUS_INPUT_OVERFLOW) {
+        g_rta_input_overflow++;
+    }
+    if (status & RTAUDIO_STATUS_OUTPUT_UNDERFLOW) {
+        g_rta_output_underflow++;
+    }
     rtaudio_ctx_t *ctx = (rtaudio_ctx_t *)userdata;
     if (!in || nframes == 0) return 0;
     const int16_t *pcm = (const int16_t *)in;
@@ -61,12 +97,26 @@ static int ltc_rtaudio_callback(void *out, void *in, unsigned int nframes,
     /* Feed and decode outside the shared mutex — decoder is only ever
      * touched from this single callback thread. */
     ltc_feed_audio(ctx->decoder, pcm, nframes, 1);
+    uint64_t callback_end_sample = ctx->decoder->sample_pos;
 
     ltc_frame_t decoded;
     while (ltc_get_frame(ctx->decoder, &decoded) == 0) {
         struct timespec ts_now;
         clock_gettime(CLOCK_MONOTONIC, &ts_now);
         uint64_t mono_ns = (uint64_t)ts_now.tv_sec * 1000000000ULL + (uint64_t)ts_now.tv_nsec;
+        uint64_t frame_end_est_ns = ingest_ns;
+        uint64_t frame_start_est_ns = ingest_ns;
+
+        if (callback_end_sample >= decoded.sample_off_end) {
+            uint64_t back_samples = callback_end_sample - decoded.sample_off_end;
+            uint64_t back_ns = (back_samples * 1000000000ULL) / ALSA_CAPTURE_RATE;
+            frame_end_est_ns = (ingest_ns > back_ns) ? (ingest_ns - back_ns) : 0;
+        }
+        if (callback_end_sample >= decoded.sample_off_start) {
+            uint64_t back_samples = callback_end_sample - decoded.sample_off_start;
+            uint64_t back_ns = (back_samples * 1000000000ULL) / ALSA_CAPTURE_RATE;
+            frame_start_est_ns = (ingest_ns > back_ns) ? (ingest_ns - back_ns) : 0;
+        }
 
         /* Mutex held only for the tiny shared-result copy (~<1 µs). */
         pthread_mutex_lock(ctx->shared_mutex);
@@ -75,6 +125,8 @@ static int ltc_rtaudio_callback(void *out, void *in, unsigned int nframes,
         ctx->shared->last_seen = time(NULL);
         ctx->shared->ingest_mono_ns = ingest_ns;
         ctx->shared->frame_mono_ns = mono_ns;
+        ctx->shared->frame_start_est_ns = frame_start_est_ns;
+        ctx->shared->frame_end_est_ns = frame_end_est_ns;
         pthread_mutex_unlock(ctx->shared_mutex);
     }
     return 0;
@@ -454,12 +506,23 @@ int main(int argc, char *argv[]) {
     rta_in.num_channels  = 1;   /* mono — RtAudio extracts channel 0 from hardware */
     rta_in.first_channel = 0;
 
-    unsigned int rta_buf = RTAUDIO_CAPTURE_PERIOD_FRAMES;
+    unsigned int requested_rta_buf = read_env_u32("LTC_RTA_PERIOD_FRAMES",
+                                                  RTAUDIO_CAPTURE_PERIOD_FRAMES,
+                                                  16,
+                                                  2048);
+    unsigned int rta_buf = requested_rta_buf;
+    unsigned int requested_rta_num_buffers = read_env_u32("LTC_RTA_NUM_BUFFERS", 4, 2, 8);
+    int ltc_smooth_enable = (int)read_env_u32("LTC_SMOOTH_ENABLE", 1, 0, 1);
+    unsigned int ltc_phase_advance_frames = read_env_u32("LTC_PHASE_ADVANCE_FRAMES", 0, 0, 4);
+    unsigned int ltc_live_need_render_div = read_env_u32("LTC_LIVE_NEED_RENDER_DIV", 20, 2, 128);
+    unsigned int ltc_live_idle_div = read_env_u32("LTC_LIVE_IDLE_DIV", 16, 2, 128);
+    uint64_t ltc_live_sleep_min_ns = (uint64_t)read_env_u32("LTC_LIVE_SLEEP_MIN_US", 100, 50, 5000) * 1000ULL;
+    uint64_t ltc_live_sleep_max_ns = (uint64_t)read_env_u32("LTC_LIVE_SLEEP_MAX_US", 2000, 100, 10000) * 1000ULL;
 
     rtaudio_stream_options_t rta_opts;
     memset(&rta_opts, 0, sizeof(rta_opts));
     rta_opts.flags       = RTAUDIO_FLAGS_MINIMIZE_LATENCY | RTAUDIO_FLAGS_SCHEDULE_REALTIME;
-    rta_opts.num_buffers = 4;
+    rta_opts.num_buffers = requested_rta_num_buffers;
     rta_opts.priority    = 80;
     strncpy(rta_opts.name, "ltc-timecode", sizeof(rta_opts.name) - 1);
 
@@ -484,8 +547,19 @@ int main(int argc, char *argv[]) {
 
     clock_gettime(CLOCK_BOOTTIME, &ts);
     fflush(stdout);
-    printf("[RTA] Capture started: device=%u buf=%u frames S16 mono 48kHz (boot+%.3f s)\n",
-           rta_dev, rta_buf, ts.tv_sec + ts.tv_nsec/1e9);
+    printf("[RTA] Capture started: device=%u req_buf=%u actual_buf=%u frames num_buffers=%u S16 mono 48kHz smooth=%s phase_adv=%u"
+           " live_sleep[need_div=%u idle_div=%u min_us=%" PRIu64 " max_us=%" PRIu64 "] (boot+%.3f s)\n",
+           rta_dev,
+           requested_rta_buf,
+           rta_buf,
+           rta_opts.num_buffers,
+           ltc_smooth_enable ? "on" : "off",
+           ltc_phase_advance_frames,
+           ltc_live_need_render_div,
+           ltc_live_idle_div,
+           (uint64_t)(ltc_live_sleep_min_ns / 1000ULL),
+           (uint64_t)(ltc_live_sleep_max_ns / 1000ULL),
+           ts.tv_sec + ts.tv_nsec/1e9);
 
     /* Main render loop */
     uint64_t frame_count = 0;
@@ -525,11 +599,17 @@ int main(int argc, char *argv[]) {
     uint64_t ingest_to_decode_samples = 0;
     uint64_t total_ingest_to_display_us = 0;  /* accumulated ADC ingest->display latency (us) */
     uint64_t ingest_to_display_samples = 0;
+    uint64_t total_frame_start_to_display_us = 0; /* estimated frame-start->display latency */
+    uint64_t frame_start_to_display_samples = 0;
+    uint64_t total_frame_end_to_display_us = 0;   /* estimated frame-end->display latency */
+    uint64_t frame_end_to_display_samples = 0;
     uint64_t last_render_mono_ns = 0;
     ltc_frame_t last_ltc_frame = {0};
     ltc_frame_t target_ltc_frame = {0};
     uint64_t target_ltc_ingest_ns = 0;
     uint64_t target_ltc_mono_ns = 0;
+    uint64_t target_ltc_start_est_ns = 0;
+    uint64_t target_ltc_end_est_ns = 0;
     int has_ltc_frame = 0;
     int has_target_ltc_frame = 0;
     int prev_display_ltc_active = 0;
@@ -654,12 +734,16 @@ int main(int argc, char *argv[]) {
         ltc_frame_t live_ltc_frame = {0};
         uint64_t live_ltc_ingest_ns = 0;
         uint64_t live_ltc_mono_ns = 0;
+        uint64_t live_ltc_start_est_ns = 0;
+        uint64_t live_ltc_end_est_ns = 0;
         int got_ltc = 0;
         pthread_mutex_lock(&ltc_mutex);
         if (ltc_shared.fresh) {
             live_ltc_frame = ltc_shared.frame;
             live_ltc_ingest_ns = ltc_shared.ingest_mono_ns;
             live_ltc_mono_ns = ltc_shared.frame_mono_ns;
+            live_ltc_start_est_ns = ltc_shared.frame_start_est_ns;
+            live_ltc_end_est_ns = ltc_shared.frame_end_est_ns;
             ltc_shared.fresh = 0;
             got_ltc = 1;
         }
@@ -673,8 +757,15 @@ int main(int argc, char *argv[]) {
             has_ltc_frame = 1;
             last_ltc_seen = now;
             target_ltc_frame = live_ltc_frame;
+            if (ltc_phase_advance_frames > 0) {
+                uint32_t fps_for_phase = nominal_ltc_fps ? nominal_ltc_fps : LTC_FRAME_RATE;
+                target_ltc_frame = tc_add_steps(&live_ltc_frame, fps_for_phase, ltc_phase_advance_frames);
+                target_ltc_frame.drop_frame = live_ltc_frame.drop_frame;
+            }
             target_ltc_ingest_ns = live_ltc_ingest_ns;
             target_ltc_mono_ns = live_ltc_mono_ns;
+            target_ltc_start_est_ns = live_ltc_start_est_ns;
+            target_ltc_end_est_ns = live_ltc_end_est_ns;
             has_target_ltc_frame = 1;
             if (!smooth_clock_init) {
                 clock_gettime(CLOCK_MONOTONIC, &last_smooth_ts);
@@ -695,10 +786,16 @@ int main(int argc, char *argv[]) {
                 has_target_ltc_frame = 0;
                 target_ltc_ingest_ns = 0;
                 target_ltc_mono_ns = 0;
+                target_ltc_start_est_ns = 0;
+                target_ltc_end_est_ns = 0;
                 smooth_budget_frames = 0.0;
                 ltc_frame_to_string_with_tz(&last_ltc_frame, tm_local, timecode_str, sizeof(timecode_str));
             } else {
                 if (has_target_ltc_frame && got_ltc) {
+                    if (!ltc_smooth_enable) {
+                        last_ltc_frame = target_ltc_frame;
+                        smooth_budget_frames = 0.0;
+                    } else {
                     uint32_t fps_for_smooth = nominal_ltc_fps ? nominal_ltc_fps : LTC_FRAME_RATE;
                     int32_t delta = tc_signed_delta(&last_ltc_frame, &target_ltc_frame, fps_for_smooth);
 
@@ -748,6 +845,7 @@ int main(int argc, char *argv[]) {
                         /* Prevent budget buildup while already in sync. */
                         smooth_budget_frames = 1.0;
                     }
+                    }
                 }
                 ltc_frame_to_string(&last_ltc_frame, timecode_str, sizeof(timecode_str));
             }
@@ -792,7 +890,8 @@ int main(int argc, char *argv[]) {
         int need_render = (display_ltc_active ? (got_ltc && text_changed) : text_changed) ||
                           display_state_changed || source_fade_active;
         prev_display_ltc_active = display_ltc_active;
-        if (need_render && !source_fade_active) {
+        int immediate_ltc_update = (display_ltc_active && got_ltc && text_changed);
+        if (need_render && !source_fade_active && !immediate_ltc_update) {
             uint64_t now_mono_ns = loop_mono_ns;
 
             uint64_t min_interval_ns;
@@ -1109,6 +1208,16 @@ int main(int argc, char *argv[]) {
                     total_ingest_to_display_us += (now_mono_ns - target_ltc_ingest_ns) / 1000ULL;
                     ingest_to_display_samples++;
                 }
+
+                if (target_ltc_start_est_ns > 0 && now_mono_ns >= target_ltc_start_est_ns) {
+                    total_frame_start_to_display_us += (now_mono_ns - target_ltc_start_est_ns) / 1000ULL;
+                    frame_start_to_display_samples++;
+                }
+
+                if (target_ltc_end_est_ns > 0 && now_mono_ns >= target_ltc_end_est_ns) {
+                    total_frame_end_to_display_us += (now_mono_ns - target_ltc_end_est_ns) / 1000ULL;
+                    frame_end_to_display_samples++;
+                }
             }
 
             /* Page flip (vblank-synced) */
@@ -1141,11 +1250,27 @@ int main(int argc, char *argv[]) {
                 ? total_ingest_to_decode_us / ingest_to_decode_samples : 0;
             uint64_t avg_ingest_to_display_us = ingest_to_display_samples > 0
                 ? total_ingest_to_display_us / ingest_to_display_samples : 0;
+            uint64_t avg_frame_start_to_display_us = frame_start_to_display_samples > 0
+                ? total_frame_start_to_display_us / frame_start_to_display_samples : 0;
+            uint64_t avg_frame_end_to_display_us = frame_end_to_display_samples > 0
+                ? total_frame_end_to_display_us / frame_end_to_display_samples : 0;
+            double avg_in_out_ms = (double)avg_ingest_to_display_us / 1000.0;
+            double avg_tc_end_disp_ms = (double)avg_frame_end_to_display_us / 1000.0;
+            double avg_tc_start_disp_ms = (double)avg_frame_start_to_display_us / 1000.0;
+            double half_scan_ms = (g_drm.mode_refresh_hz > 0.0f)
+                ? (1000.0 / ((double)g_drm.mode_refresh_hz * 2.0)) : 0.0;
+            double avg_tc_end_glass_mid_ms = avg_tc_end_disp_ms + half_scan_ms;
             printf("[MAIN] Frame %" PRIu64 ", TC: %s | rendered=%" PRIu64
                    " skipped=%" PRIu64 " avg_render=%" PRIu64 "us ltc_fps=%.2f "
-                   "adc_dec_lat_us=%" PRIu64 " dec_disp_lat_us=%" PRIu64 " adc_disp_lat_us=%" PRIu64 "\n",
+                     "adc_dec_lat_us=%" PRIu64 " dec_disp_lat_us=%" PRIu64 " adc_disp_lat_us=%" PRIu64
+                   " tc_start_disp_lat_us=%" PRIu64 " tc_end_disp_lat_us=%" PRIu64
+                   " in_out_ms=%.3f tc_end_disp_ms=%.3f tc_start_disp_ms=%.3f tc_end_glass_mid_ms=%.3f"
+                   " rta_in_ovf=%" PRIu64 " rta_out_udf=%" PRIu64 "\n",
                    frame_count, timecode_str, render_op_count, skip_count, avg_us, detected_ltc_fps,
-                   avg_ingest_to_decode_us, avg_decode_to_display_us, avg_ingest_to_display_us);
+                     avg_ingest_to_decode_us, avg_decode_to_display_us, avg_ingest_to_display_us,
+                   avg_frame_start_to_display_us, avg_frame_end_to_display_us,
+                   avg_in_out_ms, avg_tc_end_disp_ms, avg_tc_start_disp_ms, avg_tc_end_glass_mid_ms,
+                     g_rta_input_overflow, g_rta_output_underflow);
             fflush(stdout);
             render_op_count = 0;
             skip_count = 0;
@@ -1156,6 +1281,10 @@ int main(int argc, char *argv[]) {
             ingest_to_decode_samples = 0;
             total_ingest_to_display_us = 0;
             ingest_to_display_samples = 0;
+            total_frame_start_to_display_us = 0;
+            frame_start_to_display_samples = 0;
+            total_frame_end_to_display_us = 0;
+            frame_end_to_display_samples = 0;
         }
 
         /* Adaptive pacing to avoid busy-spin when content is unchanged. */
@@ -1175,14 +1304,30 @@ int main(int argc, char *argv[]) {
                 target_period_ns = 10000000ULL;
             }
 
-            uint64_t sleep_ns = need_render ? (target_period_ns / 10ULL) : (target_period_ns / 4ULL);
+            uint64_t sleep_ns;
+            if (ltc_live) {
+                sleep_ns = need_render
+                    ? (target_period_ns / (uint64_t)ltc_live_need_render_div)
+                    : (target_period_ns / (uint64_t)ltc_live_idle_div);
+            } else {
+                sleep_ns = need_render ? (target_period_ns / 10ULL) : (target_period_ns / 4ULL);
+            }
 
             /* Keep checks responsive for config updates and LTC lock changes. */
-            if (sleep_ns < 500000ULL) {
-                sleep_ns = 500000ULL;      /* 0.5 ms min */
-            }
-            if (sleep_ns > 8000000ULL) {
-                sleep_ns = 8000000ULL;     /* 8 ms max */
+            if (ltc_live) {
+                if (sleep_ns < ltc_live_sleep_min_ns) {
+                    sleep_ns = ltc_live_sleep_min_ns;
+                }
+                if (sleep_ns > ltc_live_sleep_max_ns) {
+                    sleep_ns = ltc_live_sleep_max_ns;
+                }
+            } else {
+                if (sleep_ns < 500000ULL) {
+                    sleep_ns = 500000ULL;      /* 0.5 ms min */
+                }
+                if (sleep_ns > 8000000ULL) {
+                    sleep_ns = 8000000ULL;     /* 8 ms max */
+                }
             }
 
             struct timespec ts_sleep = {

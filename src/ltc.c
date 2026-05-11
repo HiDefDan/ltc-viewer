@@ -340,6 +340,8 @@ int ltc_get_frame(ltc_decoder_t *decoder, ltc_frame_t *frame) {
             .frame = stime.frame,
             .days = stime.days,
             .drop_frame = frame_ext.ltc.dfbit ? 1 : 0,
+            .sample_off_start = (uint64_t)frame_ext.off_start,
+            .sample_off_end = (uint64_t)frame_ext.off_end,
         };
 
         const ltc_frame_t *seq_ref = NULL;

@@ -10,6 +10,14 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ltc-timecode
+Environment=LTC_RTA_PERIOD_FRAMES=32
+Environment=LTC_SMOOTH_ENABLE=0
+Environment=LTC_RTA_NUM_BUFFERS=2
+Environment=LTC_PHASE_ADVANCE_FRAMES=1
+Environment=LTC_LIVE_NEED_RENDER_DIV=20
+Environment=LTC_LIVE_IDLE_DIV=16
+Environment=LTC_LIVE_SLEEP_MIN_US=100
+Environment=LTC_LIVE_SLEEP_MAX_US=2000
 
 # Isolate the service to the dedicated render core.
 CPUAffinity=3

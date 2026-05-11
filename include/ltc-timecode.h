@@ -13,6 +13,8 @@ typedef struct {
     uint32_t hours;     /* 0-23 */
     uint32_t days;      /* 0-? for multi-day markers or user bits */
     int drop_frame;     /* 1 when source marks drop-frame timecode */
+    uint64_t sample_off_start; /* libltc sample offset for start of decoded frame */
+    uint64_t sample_off_end;   /* libltc sample offset for end of decoded frame */
 } ltc_frame_t;
 
 /* LTC decoder state machine (uses libltc internally) */

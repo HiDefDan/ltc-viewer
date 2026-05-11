@@ -61,8 +61,10 @@ install: all
 	install -d /etc/ltc-viewer
 	install -m 755 $(MAIN_TARGET) /usr/local/bin/
 	install -m 755 $(CONFIG_TARGET) /usr/local/bin/
+	install -m 755 scripts/ltc-boot-tune.sh /usr/local/bin/
 	install -d /usr/share/ltc-timecode/glyphs
 	install -m 644 data/glyphs/*.png /usr/share/ltc-timecode/glyphs/
+	install -m 644 systemd/ltc-boot-tune.service /etc/systemd/system/
 	install -m 644 systemd/ltc-timecode.service /etc/systemd/system/
 	install -m 644 systemd/ltc-config.service /etc/systemd/system/
 	install -m 644 config/default-config.json /etc/ltc-viewer/config.json.default
@@ -73,14 +75,16 @@ install: all
 	install -d /etc/sudoers.d
 	install -m 440 config/sudoers.d/ltc-config /etc/sudoers.d/ltc-config
 	systemctl daemon-reload
-	@echo "[INSTALL] Installed. Enable with: systemctl enable ltc-config ltc-timecode"
+	@echo "[INSTALL] Installed. Enable with: systemctl enable ltc-boot-tune ltc-config ltc-timecode"
 
 uninstall:
-	systemctl stop ltc-timecode ltc-config || true
-	systemctl disable ltc-timecode ltc-config || true
+	systemctl stop ltc-timecode ltc-config ltc-boot-tune || true
+	systemctl disable ltc-timecode ltc-config ltc-boot-tune || true
 	rm -f /usr/local/bin/$(MAIN_TARGET)
 	rm -f /usr/local/bin/$(CONFIG_TARGET)
+	rm -f /usr/local/bin/ltc-boot-tune.sh
 	rm -rf /usr/share/ltc-timecode/glyphs
+	rm -f /etc/systemd/system/ltc-boot-tune.service
 	rm -f /etc/systemd/system/ltc-timecode.service
 	rm -f /etc/systemd/system/ltc-config.service
 	rm -f /etc/sudoers.d/ltc-config

@@ -1,0 +1,13 @@
+[Unit]
+Description=LTC Boot Performance Tuning
+DefaultDependencies=no
+After=local-fs.target
+Before=ltc-timecode.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ltc-boot-tune.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
