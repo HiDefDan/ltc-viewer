@@ -24,7 +24,7 @@ COMPILE_CFLAGS = $(BASE_CFLAGS) \
 # Build dependencies: sudo apt install -y git pkg-config build-essential xxd libdrm-dev libpng-dev libmicrohttpd-dev libwebsockets-dev libltc-dev libasound2-dev
 
 # Main timecode application source files
-MAIN_SRCS = src/main.c src/drm.c src/font.c src/ltc.c src/gpio.c src/config-management.c src/config-watcher.c
+MAIN_SRCS = src/main.c src/drm.c src/display-backend.c src/font.c src/ltc.c src/gpio.c src/config-management.c src/config-watcher.c
 MAIN_OBJS = $(MAIN_SRCS:.c=.o)
 MAIN_TARGET = ltc-timecode
 
