@@ -512,6 +512,7 @@ int main(int argc, char *argv[]) {
                                                   2048);
     unsigned int rta_buf = requested_rta_buf;
     unsigned int requested_rta_num_buffers = read_env_u32("LTC_RTA_NUM_BUFFERS", 4, 2, 8);
+    unsigned int rta_rt_priority = read_env_u32("LTC_RTA_RT_PRIORITY", 80, 50, 98);
     int ltc_smooth_enable = (int)read_env_u32("LTC_SMOOTH_ENABLE", 1, 0, 1);
     unsigned int ltc_phase_advance_frames = read_env_u32("LTC_PHASE_ADVANCE_FRAMES", 0, 0, 4);
     unsigned int ltc_live_need_render_div = read_env_u32("LTC_LIVE_NEED_RENDER_DIV", 20, 2, 128);
@@ -523,7 +524,7 @@ int main(int argc, char *argv[]) {
     memset(&rta_opts, 0, sizeof(rta_opts));
     rta_opts.flags       = RTAUDIO_FLAGS_MINIMIZE_LATENCY | RTAUDIO_FLAGS_SCHEDULE_REALTIME;
     rta_opts.num_buffers = requested_rta_num_buffers;
-    rta_opts.priority    = 80;
+    rta_opts.priority    = (int)rta_rt_priority;
     strncpy(rta_opts.name, "ltc-timecode", sizeof(rta_opts.name) - 1);
 
     int rta_rc = rtaudio_open_stream(rtactx.rta,
@@ -547,12 +548,13 @@ int main(int argc, char *argv[]) {
 
     clock_gettime(CLOCK_BOOTTIME, &ts);
     fflush(stdout);
-    printf("[RTA] Capture started: device=%u req_buf=%u actual_buf=%u frames num_buffers=%u S16 mono 48kHz smooth=%s phase_adv=%u"
-           " live_sleep[need_div=%u idle_div=%u min_us=%" PRIu64 " max_us=%" PRIu64 "] (boot+%.3f s)\n",
+        printf("[RTA] Capture started: device=%u req_buf=%u actual_buf=%u frames num_buffers=%u rt_prio=%u S16 mono 48kHz smooth=%s phase_adv=%u"
+            " live_sleep[need_div=%u idle_div=%u min_us=%" PRIu64 " max_us=%" PRIu64 "] (boot+%.3f s)\n",
            rta_dev,
            requested_rta_buf,
            rta_buf,
            rta_opts.num_buffers,
+            rta_rt_priority,
            ltc_smooth_enable ? "on" : "off",
            ltc_phase_advance_frames,
            ltc_live_need_render_div,

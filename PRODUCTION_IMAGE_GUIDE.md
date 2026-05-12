@@ -112,6 +112,25 @@ sudo systemctl restart ltc-config ltc-timecode
 sudo systemctl mask getty@tty{1..6}.service
 ```
 
+## 5a. Swap Policy for Low-Latency Appliance Units
+
+For dedicated LTC appliances, disable generated swap/zram so boot critical path and RT jitter are not impacted by swap setup/compression work.
+
+```bash
+sudo install -d -m 755 /etc/rpi/swap.conf.d
+printf "[Main]\nMechanism=none\n" | sudo tee /etc/rpi/swap.conf.d/99-disable-swap.conf >/dev/null
+sudo swapoff /dev/zram0 2>/dev/null || true
+```
+
+Validate after reboot:
+
+```bash
+swapon --show
+systemd-analyze critical-chain ltc-timecode.service
+```
+
+Expected: no active swap devices, and no `dev-zram0.swap` in the `critical-chain` output.
+
 ## 6. HiFiBerry LTC Input Routing
 
 Detected card is expected to be card 2 (`sndrpihifiberry`).

@@ -10,6 +10,32 @@ All notable changes to this project are documented in this file.
 - 2026-05-09: DSI production pipeline finalization, LTC ingest integration, smoothing/latency instrumentation, packaging/docs completion.
 - 2026-05-10: Render-path performance optimization campaign (portrait direct render, cache layers, pacing, glyph atlas, smoothing tuning, affinity updates).
 
+## 2026-05-12
+
+### Changed
+- Added configurable RtAudio callback scheduling priority via `LTC_RTA_RT_PRIORITY`.
+- Set appliance service default to `LTC_RTA_RT_PRIORITY=85` in runtime and image payload units.
+- Applied HiFiBerry Pro overlay on target boot config for master-clock operation (`dtoverlay=hifiberry-dacplusadcpro`).
+- Disabled generated rpi swap/zram path on target validation unit (`/etc/rpi/swap.conf.d/99-disable-swap.conf` with `Mechanism=none`).
+
+### Validation Snapshot (CM5 4 GB + HiFiBerry DAC+ADC Pro + Waveshare 8.8 DSI)
+- Boot timing after zram disable:
+	- `Startup finished in 5.136s` (was `5.268s` in immediate pre-change sample)
+	- `ltc-timecode.service @1.921s` (was `@2.052s`)
+	- zram no longer present in `critical-chain`
+- Live LTC sample (25 fps, 8 consecutive journal windows):
+	- `in_out_ms=3.780-4.044ms`, avg `3.935ms`
+	- `tc_end_disp_ms=3.969-4.222ms`, avg `4.108ms`
+	- `tc_end_glass_mid_ms=12.285-12.538ms`, avg `12.424ms`
+	- xruns stayed `0/0`
+- Field camera observation: roughly `~1 frame` visible source-to-panel delay from Rosendahl MIF LTC to DSI output.
+
+### Roadmap TODO (Post-Baseline)
+- Implement PTP-disciplined timestamp domain for cross-device correlation while keeping monotonic timing for in-process latency.
+- Add optional bounded AGC-lite stage (leaky peak follower + clamp + bypass) ahead of libltc decode.
+- Add fault-injection test profile (GM loss, network flap, clock step) with recovery criteria and pass/fail capture.
+- Add optional PPS health monitor to track LTC second-boundary phase against hardware-accurate PPS.
+
 ## 2026-05-10
 
 ### Added
@@ -32,6 +58,24 @@ All notable changes to this project are documented in this file.
 	- removed `Wants=network-online.target` and `After=multi-user.target` from `ltc-timecode.service`
 	- removed `After=network.target` and `Before=ltc-timecode.service` from `ltc-config.service`
 - Fixed intermittent dim glyph rendering after LTC/ToD transitions by including effective alpha in glyph-cache key matching.
+- Added RtAudio overflow/underflow telemetry and direct millisecond latency reporting (`in_out_ms`, `tc_end_disp_ms`, `tc_start_disp_ms`, `tc_end_glass_mid_ms`).
+- Added estimated LTC frame start/end sample timing metadata from libltc for improved analog-to-display latency analysis.
+- Added runtime-configurable low-latency tuning controls for capture period, RtAudio queue depth, smoothing, phase advance, and live-loop sleep policy.
+- Set low-latency runtime defaults for appliance operation:
+	- `LTC_RTA_PERIOD_FRAMES=32`
+	- `LTC_RTA_NUM_BUFFERS=2`
+	- `LTC_SMOOTH_ENABLE=0`
+	- `LTC_PHASE_ADVANCE_FRAMES=1`
+	- `LTC_LIVE_NEED_RENDER_DIV=20`
+	- `LTC_LIVE_IDLE_DIV=16`
+	- `LTC_LIVE_SLEEP_MIN_US=100`
+	- `LTC_LIVE_SLEEP_MAX_US=2000`
+- Added persistent boot tuning service (`ltc-boot-tune.service`) to re-apply CPU governor `performance` and IRQ affinity on every boot.
+- Applied additional system-level latency trimming on target validation system:
+	- disabled `wpa_supplicant.service`
+	- disabled `NetworkManager-wait-online.service`
+	- disabled Wi-Fi radio
+	- pinned IRQs `142`, `149`, `187` to CPU mask `4`
 - Applied appliance boot-service slimming on target image/runtime (kept mDNS, cron, NTP):
 	- disabled `bluetooth.service`
 	- disabled `console-setup.service`
@@ -56,6 +100,19 @@ All notable changes to this project are documented in this file.
 	- `adc_disp_lat_us`: callback ingest timestamp -> rendered display completion timestamp.
 - 2026-05-10 live check (service PID 17548, 5 fresh samples):
 	- `adc_dec_lat_us=2-4us`, `dec_disp_lat_us=9401-10015us`, `adc_disp_lat_us=9405-10019us`.
+- 2026-05-11 long-window tuned sample (25 fps, 52 samples, 180 s capture):
+	- `in_out_ms=8.890-10.097ms`, avg `9.557ms`
+	- `tc_end_disp_ms=9.279-10.611ms`, avg `9.927ms`
+	- `tc_start_disp_ms=49.257-50.589ms`, avg `49.907ms`
+	- `tc_end_glass_mid_ms=17.595-18.927ms`, avg `18.243ms`
+- 2026-05-11 persistent low-latency profile with phase advance + boot tuning (recent 15 min journal aggregate):
+	- before extra trim: `in_out_ms avg=7.103ms`, `tc_start_disp_ms avg=47.456ms`
+	- after extra trim: `in_out_ms avg=6.641ms`, `tc_start_disp_ms avg=46.991ms`
+	- xruns remained `0/0`
+- 2026-05-11 live appliance defaults confirmed after deployment:
+	- `req_buf=32`, `actual_buf=32`, `num_buffers=2`, `smooth=off`, `phase_adv=1`
+	- CPU governor: `performance` on all four cores
+	- IRQ masks: `142=4`, `149=4`, `187=4`
 - CPU affinity repeatability matrix (2026-05-10, 3 fresh frame samples/profile, LTC ~25 fps):
 
 | Profile | Service CPUAffinity | Main thread pin | avg_rendered | avg_render (us) | avg_disp_lat (ms) | ps CPU snapshot |
