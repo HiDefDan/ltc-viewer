@@ -10,6 +10,12 @@ All notable changes to this project are documented in this file.
 - 2026-05-09: DSI production pipeline finalization, LTC ingest integration, smoothing/latency instrumentation, packaging/docs completion.
 - 2026-05-10: Render-path performance optimization campaign (portrait direct render, cache layers, pacing, glyph atlas, smoothing tuning, affinity updates).
 
+## 2026-05-13
+
+### Fixed
+- Corrected portrait glyph orientation in the GBM/EGL backend by applying per-glyph UV rotation for portrait DSI panels in `src/display-backend-gbm.c`.
+- Confirmed the Waveshare 8.8" portrait canvas now renders upright timecode text without stacking artifacts.
+
 ## 2026-05-12
 
 ### Changed

@@ -38,11 +38,29 @@ static uint8_t *load_png_rgba(const char *filename, uint32_t *w, uint32_t *h) {
     png_read_info(png, info);
     *w = png_get_image_width(png, info);
     *h = png_get_image_height(png, info);
-    png_set_expand(png);
+
+    png_byte color_type = png_get_color_type(png, info);
+    png_byte bit_depth = png_get_bit_depth(png, info);
+    int has_alpha = (color_type & PNG_COLOR_MASK_ALPHA) || png_get_valid(png, info, PNG_INFO_tRNS);
+
+    if (color_type == PNG_COLOR_TYPE_PALETTE) {
+        png_set_palette_to_rgb(png);
+    }
+    if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) {
+        png_set_expand_gray_1_2_4_to_8(png);
+    }
+    if (png_get_valid(png, info, PNG_INFO_tRNS)) {
+        png_set_tRNS_to_alpha(png);
+        has_alpha = 1;
+    }
+    if (color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA) {
+        png_set_gray_to_rgb(png);
+    }
+    if (!has_alpha) {
+        png_set_add_alpha(png, 0xFF, PNG_FILLER_AFTER);
+    }
     png_set_strip_16(png);
     png_set_packing(png);
-    png_set_filler(png, 0xFF, PNG_FILLER_AFTER);
-    png_set_gray_to_rgb(png);
     png_read_update_info(png, info);
     size_t rowbytes = png_get_rowbytes(png, info);
     uint8_t *pixels = malloc(rowbytes * (*h));
@@ -69,7 +87,7 @@ static const char *glyphs_dir(void) {
 static int build_font_atlas(void) {
     const char *glyphs[GLYPH_COUNT] = {"0","1","2","3","4","5","6","7","8","9","period"};
     const char *dir = glyphs_dir();
-    uint32_t gw[GLYPH_COUNT], gh[GLYPH_COUNT];
+    uint32_t gw[GLYPH_COUNT] = {0}, gh[GLYPH_COUNT] = {0};
     uint8_t *gimg[GLYPH_COUNT] = {0};
     uint32_t total_w = 0, max_h = 0;
     for (int i = 0; i < GLYPH_COUNT; i++) {
@@ -104,17 +122,42 @@ static int build_font_atlas(void) {
         x += gw[i];
         free(gimg[i]);
     }
+    uint8_t min_alpha = 255;
+    uint8_t max_alpha = 0;
+    uint64_t alpha_sum = 0;
+
     glGenTextures(1, &font_atlas_tex);
     glBindTexture(GL_TEXTURE_2D, font_atlas_tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, total_w, max_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+
+    for (uint32_t i = 3; i < total_w * max_h * 4; i += 4) {
+        uint8_t a = atlas[i];
+        if (a < min_alpha) min_alpha = a;
+        if (a > max_alpha) max_alpha = a;
+        alpha_sum += a;
+    }
+    fprintf(stderr, "[GBM] font atlas alpha range [%u..%u] avg=%.1f\n",
+            min_alpha, max_alpha, (double)alpha_sum / (double)(total_w * max_h));
+    fflush(stderr);
+
     free(atlas);
     return 0;
 }
 
 static const char *vs_src = "attribute vec2 pos; attribute vec2 uv; varying vec2 v_uv; void main() { gl_Position = vec4(pos,0,1); v_uv=uv; }";
-static const char *fs_src = "precision mediump float; varying vec2 v_uv; uniform sampler2D tex; uniform vec4 u_color; void main() { float alpha = texture2D(tex, v_uv).r; gl_FragColor = vec4(u_color.rgb, u_color.a * alpha); }";
+static const char *fs_src =
+    "precision mediump float;\n"
+    "varying vec2 v_uv;\n"
+    "uniform sampler2D tex;\n"
+    "uniform vec4 u_color;\n"
+    "void main() {\n"
+    "    float alpha = texture2D(tex, v_uv).r;\n" // Use glyph intensity from the gray channel as opacity
+    "    gl_FragColor = vec4(u_color.rgb, u_color.a * alpha);\n"
+    "}";
 static GLuint prog = 0, attr_pos = 0, attr_uv = 0;
 
 static GLuint setup_backbuffer_shader(void) {
@@ -162,6 +205,7 @@ static void gbm_backend_draw_quad(ltc_gbm_context_t *ctx,
                                  uint32_t logical_width,
                                  uint32_t logical_height)
 {
+    (void)logical_width;
     if (!ctx || ctx->width == 0 || ctx->height == 0) {
         return;
     }
@@ -183,11 +227,24 @@ static void gbm_backend_draw_quad(ltc_gbm_context_t *ctx,
     float ndc_x1 = (phys_x1 / (float)ctx->width) * 2.0f - 1.0f;
     float ndc_y1 = 1.0f - (phys_y1 / (float)ctx->height) * 2.0f;
 
+    float u00 = u0, v00 = v0;
+    float u10 = u1, v10 = v0;
+    float u11 = u1, v11 = v1;
+    float u01 = u0, v01 = v1;
+
+    if (portrait_mode) {
+        // Rotate the glyph texture 90 degrees CCW for portrait display.
+        u00 = u1; v00 = v0;
+        u10 = u1; v10 = v1;
+        u11 = u0; v11 = v1;
+        u01 = u0; v01 = v0;
+    }
+
     float verts[16] = {
-        ndc_x0, ndc_y0, u0, v0,
-        ndc_x1, ndc_y0, u1, v0,
-        ndc_x1, ndc_y1, u1, v1,
-        ndc_x0, ndc_y1, u0, v1
+        ndc_x0, ndc_y0, u00, v00,
+        ndc_x1, ndc_y0, u10, v10,
+        ndc_x1, ndc_y1, u11, v11,
+        ndc_x0, ndc_y1, u01, v01
     };
 
     uint32_t alpha_key = (color >> 24) & 0xFFu;
@@ -196,7 +253,13 @@ static void gbm_backend_draw_quad(ltc_gbm_context_t *ctx,
     float g = ((color >> 8) & 0xFFu) / 255.0f;
     float b = (color & 0xFFu) / 255.0f;
 
+    glUseProgram(prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, font_atlas_tex);
+    glUniform1i(text_tex_loc, 0);
     glUniform4f(text_color_loc, r, g, b, a);
+    glEnableVertexAttribArray(attr_pos);
+    glEnableVertexAttribArray(attr_uv);
     glVertexAttribPointer(attr_pos, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), verts);
     glVertexAttribPointer(attr_uv, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), verts + 2);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
@@ -302,8 +365,25 @@ static void gbm_backend_draw_df_badge(ltc_gbm_context_t *ctx,
 }
 
 int gbm_backend_render(ltc_gbm_context_t *ctx, const gbm_render_state_t *state) {
+    static char prev_timecode[64] = {0};
     if (!ctx || !state || !ctx->egl_display || !ctx->egl_surface || !font_atlas_tex || !prog) {
         return -1;
+    }
+
+    if (state->timecode_str && state->timecode_str[0] &&
+        strcmp(prev_timecode, state->timecode_str) != 0) {
+        fprintf(stderr, "[GBM] render state: text='%s' color=0x%08X x=%u y=%u scale=%.2f portrait=%d logical=%ux%u\n",
+                state->timecode_str,
+                state->target_text_color,
+                state->text_x,
+                state->text_y,
+                state->glyph_scale,
+                state->portrait_mode,
+                state->logical_width,
+                state->logical_height);
+        fflush(stderr);
+        strncpy(prev_timecode, state->timecode_str, sizeof(prev_timecode) - 1);
+        prev_timecode[sizeof(prev_timecode) - 1] = '\0';
     }
 
     glViewport(0, 0, ctx->width, ctx->height);
@@ -316,11 +396,7 @@ int gbm_backend_render(ltc_gbm_context_t *ctx, const gbm_render_state_t *state) 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    glUseProgram(prog);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, font_atlas_tex);
-    glUniform1i(text_tex_loc, 0);
-
+    // Draw background pattern
     const char *bg_pattern = "8.8.8.8.8.8.8.8.";
     gbm_backend_draw_text(ctx, bg_pattern,
                          state->bg_x,
@@ -331,6 +407,7 @@ int gbm_backend_render(ltc_gbm_context_t *ctx, const gbm_render_state_t *state) 
                          state->logical_width,
                          state->logical_height);
 
+    // Draw timecode or fade
     if (state->source_fade_active) {
         if (state->fade_from_str && state->fade_from_color != 0) {
             gbm_backend_draw_text(ctx, state->fade_from_str,
@@ -363,6 +440,7 @@ int gbm_backend_render(ltc_gbm_context_t *ctx, const gbm_render_state_t *state) 
                              state->logical_height);
     }
 
+    // Draw overlay if enabled
     if (state->debug_overlay_enabled && state->overlay_str) {
         gbm_backend_draw_text(ctx, state->overlay_str,
                              12.0f,
@@ -411,6 +489,7 @@ static int find_display_connector(int fd, uint32_t *connector_id) {
 
     uint32_t dsi_id = 0;
     uint32_t hdmi_id = 0;
+    int dsi_idx = -1, hdmi_idx = -1, dsi_type = 0, hdmi_type = 0;
 
     for (int i = 0; i < res->count_connectors; i++) {
         drmModeConnector *conn = drmModeGetConnector(fd, res->connectors[i]);
@@ -419,9 +498,13 @@ static int find_display_connector(int fd, uint32_t *connector_id) {
         if (conn->connection == DRM_MODE_CONNECTED) {
             if (conn->connector_type == DRM_MODE_CONNECTOR_DSI && !dsi_id) {
                 dsi_id = res->connectors[i];
+                dsi_idx = i;
+                dsi_type = conn->connector_type;
             } else if ((conn->connector_type == DRM_MODE_CONNECTOR_HDMIA ||
                         conn->connector_type == DRM_MODE_CONNECTOR_HDMIB) && !hdmi_id) {
                 hdmi_id = res->connectors[i];
+                hdmi_idx = i;
+                hdmi_type = conn->connector_type;
             }
         }
         drmModeFreeConnector(conn);
@@ -431,10 +514,14 @@ static int find_display_connector(int fd, uint32_t *connector_id) {
 
     if (dsi_id) {
         *connector_id = dsi_id;
+        fprintf(stderr, "[GBM] Using DSI connector=%u (index=%d type=%d)\n", dsi_id, dsi_idx, dsi_type);
+        fflush(stderr);
         return 0;
     }
     if (hdmi_id) {
         *connector_id = hdmi_id;
+        fprintf(stderr, "[GBM] Using HDMI connector=%u (index=%d type=%d)\n", hdmi_id, hdmi_idx, hdmi_type);
+        fflush(stderr);
         return 0;
     }
     return -1;
@@ -549,8 +636,46 @@ int gbm_backend_init(ltc_gbm_context_t *ctx, uint32_t width, uint32_t height, fl
         return -1;
     }
     ctx->width = width ? width : 480;
-    ctx->height = height ? height : 192;
+    ctx->height = height ? height : 1920;
     ctx->refresh_hz = refresh_hz > 0.0f ? refresh_hz : 60.0f;
+
+    drmModeConnector *conn = drmModeGetConnector(drm_fd, ctx->connector_id);
+    if (!conn) {
+        fprintf(stderr, "[GBM] Failed to get connector %u\n", ctx->connector_id); fflush(stderr);
+        gbm_device_destroy(ctx->gbm_dev);
+        close(drm_fd);
+        return -1;
+    }
+    drmModeModeInfo *mode = find_mode(conn, ctx->width, ctx->height, ctx->refresh_hz);
+    if (!mode) {
+        fprintf(stderr, "[GBM] Failed to find display mode for %ux%u@%.2f\n", ctx->width, ctx->height, ctx->refresh_hz); fflush(stderr);
+        drmModeFreeConnector(conn);
+        gbm_device_destroy(ctx->gbm_dev);
+        close(drm_fd);
+        return -1;
+    }
+    ctx->mode = *mode;
+    if ((uint32_t)ctx->mode.hdisplay != ctx->width || (uint32_t)ctx->mode.vdisplay != ctx->height) {
+        fprintf(stderr, "[GBM] Requested %ux%u does not match chosen mode %ux%u, using mode size\n",
+                width ? width : 480, height ? height : 1920,
+                ctx->mode.hdisplay, ctx->mode.vdisplay);
+        fflush(stderr);
+        ctx->width = ctx->mode.hdisplay;
+        ctx->height = ctx->mode.vdisplay;
+    }
+    if (find_crtc_for_connector(drm_fd, conn, &ctx->crtc_id) != 0) {
+        fprintf(stderr, "[GBM] Failed to find CRTC for connector %u\n", ctx->connector_id); fflush(stderr);
+        drmModeFreeConnector(conn);
+        gbm_device_destroy(ctx->gbm_dev);
+        close(drm_fd);
+        return -1;
+    }
+    printf("[GBM] Selected connector=%u crtc=%u mode=%ux%u@%.2f\n",
+           ctx->connector_id, ctx->crtc_id, ctx->mode.hdisplay, ctx->mode.vdisplay,
+           (float)ctx->mode.vrefresh);
+    fflush(stdout);
+    drmModeFreeConnector(conn);
+
     ctx->gbm_surf = gbm_surface_create(ctx->gbm_dev, ctx->width, ctx->height, GBM_FORMAT_ARGB8888, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
     if (ctx->gbm_surf) {
         ctx->drm_format = DRM_FORMAT_ARGB8888;
@@ -565,38 +690,6 @@ int gbm_backend_init(ltc_gbm_context_t *ctx, uint32_t width, uint32_t height, fl
         }
         ctx->drm_format = DRM_FORMAT_XRGB8888;
     }
-
-    drmModeConnector *conn = drmModeGetConnector(drm_fd, ctx->connector_id);
-    if (!conn) {
-        fprintf(stderr, "[GBM] Failed to get connector %u\n", ctx->connector_id); fflush(stderr);
-        gbm_surface_destroy(ctx->gbm_surf);
-        gbm_device_destroy(ctx->gbm_dev);
-        close(drm_fd);
-        return -1;
-    }
-    drmModeModeInfo *mode = find_mode(conn, ctx->width, ctx->height, ctx->refresh_hz);
-    if (!mode) {
-        fprintf(stderr, "[GBM] Failed to find display mode for %ux%u@%.2f\n", ctx->width, ctx->height, ctx->refresh_hz); fflush(stderr);
-        drmModeFreeConnector(conn);
-        gbm_surface_destroy(ctx->gbm_surf);
-        gbm_device_destroy(ctx->gbm_dev);
-        close(drm_fd);
-        return -1;
-    }
-    ctx->mode = *mode;
-    if (find_crtc_for_connector(drm_fd, conn, &ctx->crtc_id) != 0) {
-        fprintf(stderr, "[GBM] Failed to find CRTC for connector %u\n", ctx->connector_id); fflush(stderr);
-        drmModeFreeConnector(conn);
-        gbm_surface_destroy(ctx->gbm_surf);
-        gbm_device_destroy(ctx->gbm_dev);
-        close(drm_fd);
-        return -1;
-    }
-    printf("[GBM] Selected connector=%u crtc=%u mode=%ux%u@%.2f format=0x%08x\n",
-           ctx->connector_id, ctx->crtc_id, ctx->mode.hdisplay, ctx->mode.vdisplay,
-           (float)ctx->mode.vrefresh, ctx->drm_format);
-    fflush(stdout);
-    drmModeFreeConnector(conn);
 
     ctx->egl_display = eglGetDisplay((EGLNativeDisplayType)ctx->gbm_dev);
     if (ctx->egl_display == EGL_NO_DISPLAY) {
@@ -793,7 +886,7 @@ uint32_t gbm_backend_back_width(const ltc_gbm_context_t *ctx) {
 }
 
 uint32_t gbm_backend_back_height(const ltc_gbm_context_t *ctx) {
-    return ctx ? ctx->height : 192;
+    return ctx ? ctx->height : 1920;
 }
 
 uint32_t gbm_backend_back_pitch(const ltc_gbm_context_t *ctx) {
