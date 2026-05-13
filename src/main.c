@@ -9,6 +9,7 @@
 #include <inttypes.h>
 #include <sched.h>
 #include <sys/mman.h>
+#include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
 #include <limits.h>
@@ -25,6 +26,9 @@ static volatile int should_exit = 0;
 static display_backend_t g_backend;
 static volatile uint64_t g_rta_input_overflow = 0;
 static volatile uint64_t g_rta_output_underflow = 0;
+static volatile long g_gpu_clock_mhz_x10 = 0;
+static volatile int g_gpu_clock_thread_running = 0;
+static pthread_t g_gpu_clock_thread;
 
 /* Shared state written by capture thread, read by main thread.
  * Protected by a mutex that is held only for a memcpy — never during DRM renders
@@ -69,6 +73,61 @@ static unsigned int read_env_u32(const char *name,
         parsed = max_v;
     }
     return (unsigned int)parsed;
+}
+
+static long parse_gpu_v3d_clock_mhz_x10(const char *buf)
+{
+    unsigned long long cycles = 0;
+    double mhz = 0.0;
+    if (sscanf(buf, "cycles: %llu (%lf Mhz)", &cycles, &mhz) >= 1) {
+        if (mhz > 0.0) {
+            return (long)(mhz * 10.0 + 0.5);
+        }
+        if (cycles > 0ULL) {
+            return (long)((double)cycles / 100000.0 + 0.5);
+        }
+    }
+
+    const char *p = strstr(buf, "Mhz");
+    if (p) {
+        const char *q = p;
+        while (q > buf && (*(q - 1) == ' ' || *(q - 1) == '\t')) {
+            q--;
+        }
+        double result = 0.0;
+        if (sscanf(q, "%lf", &result) == 1) {
+            return (long)(result * 10.0 + 0.5);
+        }
+    }
+
+    return 0;
+}
+
+static void *gpu_clock_reader_thread(void *arg)
+{
+    (void)arg;
+    const char *path = "/sys/kernel/debug/dri/1002000000.v3d/measure_clock";
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return NULL;
+    }
+
+    char buf[256];
+    struct timespec ts = {1, 0};
+    while (g_gpu_clock_thread_running) {
+        ssize_t n = pread(fd, buf, sizeof(buf) - 1, 0);
+        if (n > 0) {
+            buf[n] = '\0';
+            long x10 = parse_gpu_v3d_clock_mhz_x10(buf);
+            if (x10 > 0) {
+                g_gpu_clock_mhz_x10 = x10;
+            }
+        }
+        nanosleep(&ts, NULL);
+    }
+
+    close(fd);
+    return NULL;
 }
 
 /* RtAudio input callback — runs in RtAudio's internal callback thread.
@@ -390,6 +449,28 @@ void signal_handler(int sig) {
     should_exit = 1;
 }
 
+static inline void timecode_fade_alphas(uint64_t elapsed_ns, uint64_t duration_ns,
+                                        uint32_t *alpha_from, uint32_t *alpha_to)
+{
+    if (duration_ns == 0 || elapsed_ns >= duration_ns) {
+        *alpha_to = 255u;
+        *alpha_from = 0u;
+        return;
+    }
+
+    double t = (double)elapsed_ns / (double)duration_ns;
+    if (t < 0.0) {
+        t = 0.0;
+    } else if (t > 1.0) {
+        t = 1.0;
+    }
+
+    double fade_in = t * t;
+    double fade_out = (1.0 - t) * (1.0 - t);
+    *alpha_to = (uint32_t)(fade_in * 255.0 + 0.5);
+    *alpha_from = (uint32_t)(fade_out * 255.0 + 0.5);
+}
+
 int main(int argc, char *argv[]) {
     struct timespec ts;
     clock_gettime(CLOCK_BOOTTIME, &ts);
@@ -534,6 +615,13 @@ int main(int argc, char *argv[]) {
     rta_in.num_channels  = 1;   /* mono — RtAudio extracts channel 0 from hardware */
     rta_in.first_channel = 0;
 
+    g_gpu_clock_thread_running = 1;
+    if (pthread_create(&g_gpu_clock_thread, NULL, gpu_clock_reader_thread, NULL) != 0) {
+        g_gpu_clock_thread_running = 0;
+        fprintf(stderr, "[MAIN] Warning: Failed to start GPU clock reader thread\n");
+        fflush(stderr);
+    }
+
     unsigned int requested_rta_buf = read_env_u32("LTC_RTA_PERIOD_FRAMES",
                                                   RTAUDIO_CAPTURE_PERIOD_FRAMES,
                                                   16,
@@ -620,6 +708,7 @@ int main(int argc, char *argv[]) {
     uint32_t fade_from_color = 0;
     char fade_to_str[32] = {0};
     uint32_t fade_to_color = 0;
+
     uint64_t render_op_count = 0;   /* renders performed in current 5-s window */
     uint64_t skip_count = 0;        /* frames skipped (identical timecode) */
     uint64_t total_render_ns = 0;   /* accumulated render time (ns) */
@@ -904,7 +993,8 @@ int main(int argc, char *argv[]) {
         /* Hybrid render gate:
          * - Live LTC: redraw only on fresh decoded frames and visible text changes.
          * - No live LTC: redraw on ToD text changes so fallback remains active.
-         * - Always redraw on LTC live/loss transitions for immediate UX feedback. */
+         * - Always redraw on LTC live/loss transitions for immediate UX feedback.
+         * - For GBM/EGL, keep the GPU path active by rendering every frame. */
         int text_changed = (strcmp(timecode_str, prev_timecode_str) != 0);
         int display_state_changed = (display_ltc_active != prev_display_ltc_active);
 
@@ -917,11 +1007,13 @@ int main(int argc, char *argv[]) {
             source_fade_start_ns = loop_mono_ns;
         }
 
-        int need_render = (display_ltc_active ? (got_ltc && text_changed) : text_changed) ||
-                          display_state_changed || source_fade_active;
+        int need_render = (g_backend.type == DISPLAY_BACKEND_GBM) ? 1 :
+                          ((display_ltc_active ? (got_ltc && text_changed) : text_changed) ||
+                           display_state_changed || source_fade_active);
         prev_display_ltc_active = display_ltc_active;
         int immediate_ltc_update = (display_ltc_active && got_ltc && text_changed);
-        if (need_render && !source_fade_active && !immediate_ltc_update) {
+        if (need_render && !source_fade_active && !immediate_ltc_update &&
+            g_backend.type != DISPLAY_BACKEND_GBM) {
             uint64_t now_mono_ns = loop_mono_ns;
 
             uint64_t min_interval_ns;
@@ -1045,12 +1137,10 @@ int main(int argc, char *argv[]) {
                 render_mono_ns = (uint64_t)t_render_start.tv_sec * 1000000000ULL + (uint64_t)t_render_start.tv_nsec;
                 elapsed_ns = (render_mono_ns > source_fade_start_ns)
                     ? (render_mono_ns - source_fade_start_ns) : 0;
-                uint32_t alpha_to = 255u;
-                if (source_fade_duration_ns > 0) {
-                    alpha_to = (elapsed_ns >= source_fade_duration_ns)
-                        ? 255u : (uint32_t)((elapsed_ns * 255u) / source_fade_duration_ns);
-                }
-                uint32_t alpha_from = 255u - alpha_to;
+                uint32_t alpha_from = 0;
+                uint32_t alpha_to = 0;
+                timecode_fade_alphas(elapsed_ns, source_fade_duration_ns,
+                                      &alpha_from, &alpha_to);
                 from_color = ((alpha_from & 0xFFu) << 24) | (fade_from_color & 0x00FFFFFFu);
                 to_color = ((alpha_to & 0xFFu) << 24) | (fade_to_color & 0x00FFFFFFu);
             }
@@ -1179,17 +1269,13 @@ int main(int argc, char *argv[]) {
                     uint64_t render_mono_ns = (uint64_t)t_render_start.tv_sec * 1000000000ULL + (uint64_t)t_render_start.tv_nsec;
                     uint64_t elapsed_ns = (render_mono_ns > source_fade_start_ns)
                         ? (render_mono_ns - source_fade_start_ns) : 0;
-                    uint32_t alpha_to = 255u;
-
-                    if (source_fade_duration_ns > 0) {
-                        alpha_to = (elapsed_ns >= source_fade_duration_ns)
-                            ? 255u : (uint32_t)((elapsed_ns * 255u) / source_fade_duration_ns);
-                    }
-                    uint32_t alpha_from = 255u - alpha_to;
+                    uint32_t alpha_from = 0;
+                    uint32_t alpha_to = 0;
+                    timecode_fade_alphas(elapsed_ns, source_fade_duration_ns,
+                                          &alpha_from, &alpha_to);
 
                     uint32_t from_color = ((alpha_from & 0xFFu) << 24) | (fade_from_color & 0x00FFFFFFu);
                     uint32_t to_color = ((alpha_to & 0xFFu) << 24) | (fade_to_color & 0x00FFFFFFu);
-
                     if (alpha_from > 0) {
                         if (portrait_mode) {
                             font_blit_string_scaled_rot90ccw(render_buffer, fb_width, fb_height, render_pitch,
@@ -1379,17 +1465,53 @@ int main(int argc, char *argv[]) {
             double half_scan_ms = (display_backend_refresh_hz(&g_backend) > 0.0f)
                 ? (1000.0 / ((double)display_backend_refresh_hz(&g_backend) * 2.0)) : 0.0;
             double avg_tc_end_glass_mid_ms = avg_tc_end_disp_ms + half_scan_ms;
-            printf("[MAIN] Frame %" PRIu64 ", TC: %s | rendered=%" PRIu64
-                   " skipped=%" PRIu64 " avg_render=%" PRIu64 "us ltc_fps=%.2f "
-                     "adc_dec_lat_us=%" PRIu64 " dec_disp_lat_us=%" PRIu64 " adc_disp_lat_us=%" PRIu64
-                   " tc_start_disp_lat_us=%" PRIu64 " tc_end_disp_lat_us=%" PRIu64
-                   " in_out_ms=%.3f tc_end_disp_ms=%.3f tc_start_disp_ms=%.3f tc_end_glass_mid_ms=%.3f"
-                   " rta_in_ovf=%" PRIu64 " rta_out_udf=%" PRIu64 "\n",
-                   frame_count, timecode_str, render_op_count, skip_count, avg_us, detected_ltc_fps,
-                     avg_ingest_to_decode_us, avg_decode_to_display_us, avg_ingest_to_display_us,
-                   avg_frame_start_to_display_us, avg_frame_end_to_display_us,
-                   avg_in_out_ms, avg_tc_end_disp_ms, avg_tc_start_disp_ms, avg_tc_end_glass_mid_ms,
-                     g_rta_input_overflow, g_rta_output_underflow);
+            long gpu_clock_x10 = g_gpu_clock_mhz_x10;
+            if (gpu_clock_x10 > 0) {
+                double gpu_clock_mhz = (double)gpu_clock_x10 / 10.0;
+                printf("[MAIN] Frame %" PRIu64 ", TC: %s | rendered=%" PRIu64
+                       " skipped=%" PRIu64 " avg_render=%" PRIu64 "us ltc_fps=%.2f "
+                         "adc_dec_lat_us=%" PRIu64 " dec_disp_lat_us=%" PRIu64 " adc_disp_lat_us=%" PRIu64
+                       " tc_start_disp_lat_us=%" PRIu64 " tc_end_disp_lat_us=%" PRIu64
+                       " in_out_ms=%.3f tc_end_disp_ms=%.3f tc_start_disp_ms=%.3f tc_end_glass_mid_ms=%.3f"
+                       " gpu_mhz=%.1f"
+                       " rta_in_ovf=%" PRIu64 " rta_out_udf=%" PRIu64 "\n",
+                       frame_count, timecode_str, render_op_count, skip_count, avg_us, detected_ltc_fps,
+                         avg_ingest_to_decode_us, avg_decode_to_display_us, avg_ingest_to_display_us,
+                       avg_frame_start_to_display_us, avg_frame_end_to_display_us,
+                       avg_in_out_ms, avg_tc_end_disp_ms, avg_tc_start_disp_ms, avg_tc_end_glass_mid_ms,
+                       gpu_clock_mhz,
+                         g_rta_input_overflow, g_rta_output_underflow);
+            } else {
+                long gpu_clock_x10 = g_gpu_clock_mhz_x10;
+                if (gpu_clock_x10 > 0) {
+                    double gpu_clock_mhz = (double)gpu_clock_x10 / 10.0;
+                    printf("[MAIN] Frame %" PRIu64 ", TC: %s | rendered=%" PRIu64
+                           " skipped=%" PRIu64 " avg_render=%" PRIu64 "us ltc_fps=%.2f "
+                             "adc_dec_lat_us=%" PRIu64 " dec_disp_lat_us=%" PRIu64 " adc_disp_lat_us=%" PRIu64
+                           " tc_start_disp_lat_us=%" PRIu64 " tc_end_disp_lat_us=%" PRIu64
+                           " in_out_ms=%.3f tc_end_disp_ms=%.3f tc_start_disp_ms=%.3f tc_end_glass_mid_ms=%.3f"
+                           " gpu_mhz=%.1f"
+                           " rta_in_ovf=%" PRIu64 " rta_out_udf=%" PRIu64 "\n",
+                           frame_count, timecode_str, render_op_count, skip_count, avg_us, detected_ltc_fps,
+                             avg_ingest_to_decode_us, avg_decode_to_display_us, avg_ingest_to_display_us,
+                           avg_frame_start_to_display_us, avg_frame_end_to_display_us,
+                           avg_in_out_ms, avg_tc_end_disp_ms, avg_tc_start_disp_ms, avg_tc_end_glass_mid_ms,
+                           gpu_clock_mhz,
+                             g_rta_input_overflow, g_rta_output_underflow);
+                } else {
+                    printf("[MAIN] Frame %" PRIu64 ", TC: %s | rendered=%" PRIu64
+                           " skipped=%" PRIu64 " avg_render=%" PRIu64 "us ltc_fps=%.2f "
+                             "adc_dec_lat_us=%" PRIu64 " dec_disp_lat_us=%" PRIu64 " adc_disp_lat_us=%" PRIu64
+                           " tc_start_disp_lat_us=%" PRIu64 " tc_end_disp_lat_us=%" PRIu64
+                           " in_out_ms=%.3f tc_end_disp_ms=%.3f tc_start_disp_ms=%.3f tc_end_glass_mid_ms=%.3f"
+                           " rta_in_ovf=%" PRIu64 " rta_out_udf=%" PRIu64 "\n",
+                           frame_count, timecode_str, render_op_count, skip_count, avg_us, detected_ltc_fps,
+                             avg_ingest_to_decode_us, avg_decode_to_display_us, avg_ingest_to_display_us,
+                           avg_frame_start_to_display_us, avg_frame_end_to_display_us,
+                           avg_in_out_ms, avg_tc_end_disp_ms, avg_tc_start_disp_ms, avg_tc_end_glass_mid_ms,
+                             g_rta_input_overflow, g_rta_output_underflow);
+                }
+            }
             fflush(stdout);
             render_op_count = 0;
             skip_count = 0;
@@ -1408,8 +1530,11 @@ int main(int argc, char *argv[]) {
 
         /* Adaptive pacing to avoid busy-spin when content is unchanged. */
         {
+            float backend_hz = display_backend_refresh_hz(&g_backend);
             uint64_t target_period_ns;
-            if (ltc_live) {
+            if (backend_hz > 0.0f) {
+                target_period_ns = (uint64_t)(1000000000.0 / (double)backend_hz);
+            } else if (ltc_live) {
                 float cadence_fps = detected_ltc_fps;
                 if (cadence_fps < 10.0f || cadence_fps > 120.0f) {
                     cadence_fps = (float)(nominal_ltc_fps ? nominal_ltc_fps : LTC_FRAME_RATE);
@@ -1424,7 +1549,9 @@ int main(int argc, char *argv[]) {
             }
 
             uint64_t sleep_ns;
-            if (ltc_live) {
+            if (g_backend.type == DISPLAY_BACKEND_GBM) {
+                sleep_ns = target_period_ns;
+            } else if (ltc_live) {
                 sleep_ns = need_render
                     ? (target_period_ns / (uint64_t)ltc_live_need_render_div)
                     : (target_period_ns / (uint64_t)ltc_live_idle_div);
@@ -1433,7 +1560,14 @@ int main(int argc, char *argv[]) {
             }
 
             /* Keep checks responsive for config updates and LTC lock changes. */
-            if (ltc_live) {
+            if (g_backend.type == DISPLAY_BACKEND_GBM) {
+                if (sleep_ns < 500000ULL) {
+                    sleep_ns = 500000ULL;      /* 0.5 ms min */
+                }
+                if (sleep_ns > target_period_ns) {
+                    sleep_ns = target_period_ns;
+                }
+            } else if (ltc_live) {
                 if (sleep_ns < ltc_live_sleep_min_ns) {
                     sleep_ns = ltc_live_sleep_min_ns;
                 }
@@ -1466,6 +1600,10 @@ int main(int argc, char *argv[]) {
         if (rtaudio_is_stream_open(rtactx.rta))
             rtaudio_close_stream(rtactx.rta);
         rtaudio_destroy(rtactx.rta);
+    }
+    if (g_gpu_clock_thread_running) {
+        g_gpu_clock_thread_running = 0;
+        pthread_join(g_gpu_clock_thread, NULL);
     }
     pthread_mutex_destroy(&ltc_mutex);
     ltc_decoder_cleanup(&ltc);

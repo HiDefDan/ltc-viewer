@@ -68,9 +68,12 @@ The following measurements were captured on-device on CM5 + Waveshare 8.8 inch D
 | 2 | Cadence-aware render limiting + adaptive pacing | ~30% | ~16-18 ms |
 | 3 | Cached scaled glyph atlas (fast blit path) | ~18% | ~6.8-7.7 ms |
 | 4 | Smoothed cached alpha path + subtle gamma tuning | ~14-15% | ~5.4-5.8 ms |
+| 5 | GBM/EGL direct glyph render path | ~14-15% | ~0.10 ms |
 
 Notes:
 - `avg_render` is from the `[MAIN] Frame ... avg_render=...us` journal metric.
+- Current GBM/EGL direct render path is measuring about `103 us` average per render pass on the live DSI portrait build.
+- Default transition fade duration is now `500 ms`, and the GBM/EGL path keeps the GPU render loop active across refreshes for smoother crossfades.
 - CPU is sampled with `ps -p <pid> -o %cpu` and reflects one process on one core.
 - Small run-to-run variation is expected due to LTC cadence and system load.
 

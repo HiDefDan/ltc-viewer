@@ -93,7 +93,7 @@ void config_default(ltc_config_t *config) {
     config->dsi_ltc_loss_timeout_sec = 3;
     config->hdmi_ltc_loss_behavior = LTC_LOSS_RESTORE_TOD;
     config->hdmi_ltc_loss_timeout_sec = 3;
-    config->transition_fade_ms = 120;
+    config->transition_fade_ms = 500;
     config->debug_overlay_enabled = 0;
     
     /* Network defaults */

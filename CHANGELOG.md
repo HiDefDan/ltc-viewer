@@ -15,6 +15,8 @@ All notable changes to this project are documented in this file.
 ### Fixed
 - Corrected portrait glyph orientation in the GBM/EGL backend by applying per-glyph UV rotation for portrait DSI panels in `src/display-backend-gbm.c`.
 - Confirmed the Waveshare 8.8" portrait canvas now renders upright timecode text without stacking artifacts.
+- Increased default transition fade duration to `500 ms` and enabled GBM/EGL full-refresh rendering for smoother LTC/ToD crossfades.
+- Validated GBM/EGL render latency at about `0.10 ms` avg_render (`avg_render=103us` over 200 recent journal samples).
 
 ## 2026-05-12
 

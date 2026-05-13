@@ -210,9 +210,9 @@ void font_blit_background(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, ui
 
 void font_blit_background_scaled(uint8_t *fb, uint32_t fb_width, uint32_t fb_height, uint32_t fb_pitch,
                                  uint32_t x, uint32_t y, float scale) {
-    /* Render "8.8.8.8.8.8.8.8." - subtle dark gray visible on black canvas */
+    /* Render "88.88.88.88." - subtle dark gray visible on black canvas */
     uint32_t glyph_color = 0xFF0A0A0A;   /* RGB(10, 10, 10) - dark plastic, subtle but visible */
-    const char *bg_pattern = "8.8.8.8.8.8.8.8.";
+    const char *bg_pattern = "88.88.88.88.";
 
     font_blit_string_scaled(fb, fb_width, fb_height, fb_pitch,
                             x, y, bg_pattern,

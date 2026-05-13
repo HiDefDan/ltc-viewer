@@ -397,7 +397,7 @@ int gbm_backend_render(ltc_gbm_context_t *ctx, const gbm_render_state_t *state) 
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     // Draw background pattern
-    const char *bg_pattern = "8.8.8.8.8.8.8.8.";
+    const char *bg_pattern = "88.88.88.88.";
     gbm_backend_draw_text(ctx, bg_pattern,
                          state->bg_x,
                          state->text_y,
