@@ -15,11 +15,41 @@ This guide replaces scattered setup flow from older docs for production rollout.
 
 ## 1. Hardware Baseline
 
-- Raspberry Pi CM5 on Waveshare CM5 PoE BASE A
-- Waveshare 8.8" DSI panel on DSI0 as configured in boot overlay
-- HiFiBerry Studio DAC+ADC attached
-- LTC source connected to HiFiBerry input (balanced or unbalanced)
 
+## 1a. Display Backend Migration: DRM Dumb Buffers → GBM/EGL
+
+### Rationale
+The initial appliance uses DRM/KMS with software rendering into dumb buffers for single-output, low-latency display. For multi-output (DSI + 2x HDMI) and future-proofing, the project is migrating to a dual-backend architecture:
+
+- **Current:** DRM/KMS dumb buffer (CPU blit, single-threaded, proven low-latency)
+- **Target:** GBM/EGL/OpenGL ES (GPU-accelerated, multi-output, async present, hardware rotation)
+
+### Migration Plan
+1. Introduce a display backend abstraction (control: DRM, experimental: GBM/EGL)
+2. Wire main.c and font.c to use the backend interface
+3. Add runtime/backend selection (env or config)
+4. Incrementally port rendering to OpenGL ES shaders and texture atlas
+5. Validate latency and cadence on all outputs before switching default
+
+### Required Packages (Debian/RaspiOS)
+```bash
+sudo apt update
+sudo apt install -y libgbm-dev libegl1-mesa-dev libgles2-mesa-dev mesa-utils
+```
+
+### Notes
+- No X11/Wayland required; pure KMS/DRM + GBM/EGL is sufficient
+- EGL backend will support triple-buffering, hardware rotation, and per-output atomic present
+- The migration is staged: fallback to CPU backend is always available
+
+### Branching Policy
+- All GBM/EGL work is on `feature/gbm-egl-backend` (or sub-branches)
+- `drm-kms-implementation` remains the stable, validated baseline
+
+### Acceptance Criteria
+- No regression in end-to-end latency or xrun count
+- Stable multi-output present at 60Hz on all displays
+- Field fallback to CPU backend always available
 ## 2. Install Dependencies
 
 ```bash
@@ -185,6 +215,12 @@ sox /tmp/ltc-test.wav -n stat
 # DRM
 ls -la /dev/dri/
 modetest -c
+sudo lsof -c ltc-timecode | grep /dev/dri
+cat /sys/class/drm/card0-DSI-1/status
+cat /sys/class/drm/card0-DSI-1/enabled
+cat /sys/class/drm/card0-DSI-1/modes
+cat /sys/class/drm/card2-HDMI-A-1/status
+cat /sys/class/drm/card2-HDMI-A-2/status
 
 # Service status
 sudo systemctl --no-pager --full status ltc-timecode
@@ -195,6 +231,8 @@ taskset -cp $(pgrep ltc-timecode)
 chrt -p $(pgrep ltc-timecode)
 
 ```
+
+If `card0-DSI-1` reports `connected` and `enabled` while `card2-HDMI-A-1`/`card2-HDMI-A-2` report `disconnected`, the issue is likely physical HDMI wiring, device-tree overlay routing, or EDID/connector detection rather than the GBM/EGL renderer.
 
 Note:
 - The service may be allowed on CPU 2-3, but the current hot path still tends to
