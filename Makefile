@@ -10,7 +10,7 @@ CONFIG_PKGS = libdrm libpng libmicrohttpd libwebsockets
 # Resolve pkg-config flags package-by-package to avoid all-or-nothing failures
 MAIN_CFLAGS = $(BASE_CFLAGS) \
 	$(foreach p,$(MAIN_PKGS),$(shell pkg-config --cflags $(p) 2>/dev/null))
-MAIN_LDFLAGS = $(foreach p,$(MAIN_PKGS),$(shell pkg-config --libs $(p) 2>/dev/null)) -pthread -lltc
+MAIN_LDFLAGS = $(foreach p,$(MAIN_PKGS),$(shell pkg-config --libs $(p) 2>/dev/null)) -pthread -lltc -lgbm -lEGL -lGLESv2
 
 CONFIG_CFLAGS = $(BASE_CFLAGS) \
 	$(foreach p,$(CONFIG_PKGS),$(shell pkg-config --cflags $(p) 2>/dev/null))
@@ -24,7 +24,7 @@ COMPILE_CFLAGS = $(BASE_CFLAGS) \
 # Build dependencies: sudo apt install -y git pkg-config build-essential xxd libdrm-dev libpng-dev libmicrohttpd-dev libwebsockets-dev libltc-dev libasound2-dev
 
 # Main timecode application source files
-MAIN_SRCS = src/main.c src/drm.c src/display-backend.c src/font.c src/ltc.c src/gpio.c src/config-management.c src/config-watcher.c
+MAIN_SRCS = src/main.c src/drm.c src/display-backend.c src/display-backend-gbm.c src/font.c src/ltc.c src/gpio.c src/config-management.c src/config-watcher.c
 MAIN_OBJS = $(MAIN_SRCS:.c=.o)
 MAIN_TARGET = ltc-timecode
 
@@ -52,7 +52,7 @@ $(WEB_EMBEDDED): web/index.html web/styles.css web/app.js
 	@bash scripts/embed-web.sh $@ .
 
 %.o: %.c
-	$(CC) $(COMPILE_CFLAGS) -c $< -o $@
+	$(CC) -I./include $(COMPILE_CFLAGS) -c $< -o $@
 
 clean:
 	rm -f $(MAIN_OBJS) $(MAIN_TARGET) $(CONFIG_OBJS) $(CONFIG_TARGET) $(WEB_EMBEDDED)
