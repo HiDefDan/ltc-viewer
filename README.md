@@ -16,6 +16,7 @@ Low-latency LTC timecode display appliance for Raspberry Pi CM5 using DRM/KMS fr
 
 - DSI output is fixed at 60 Hz.
 - Portrait DSI panels now use per-glyph UV rotation in the GBM/EGL backend so text renders upright instead of stacked.
+- GBM/EGL LTC/ToD fades now preserve zero-alpha endpoints correctly, eliminating the two full-brightness flashes that could appear at transition start/end.
 - HDMI output may be configured separately for dynamic-refresh workflows.
 - LTC decode and update cadence is independent from panel scanout timing.
 - Diagnostic tip: verify the active DRM path with `sudo lsof -c ltc-timecode | grep /dev/dri` and compare against `/sys/class/drm/card0-DSI-1/status` and `/sys/class/drm/card2-HDMI-A-*/status` to confirm which connector the renderer is using.

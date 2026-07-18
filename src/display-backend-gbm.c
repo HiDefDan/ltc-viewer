@@ -201,11 +201,13 @@ static void gbm_backend_draw_quad(ltc_gbm_context_t *ctx,
                                  float u0, float v0,
                                  float u1, float v1,
                                  uint32_t color,
+                                 int use_alpha,
                                  int portrait_mode,
                                  uint32_t logical_width,
                                  uint32_t logical_height)
 {
     (void)logical_width;
+    (void)logical_height;
     if (!ctx || ctx->width == 0 || ctx->height == 0) {
         return;
     }
@@ -248,10 +250,15 @@ static void gbm_backend_draw_quad(ltc_gbm_context_t *ctx,
     };
 
     uint32_t alpha_key = (color >> 24) & 0xFFu;
-    float a = (alpha_key == 0u) ? 1.0f : ((float)alpha_key / 255.0f);
+    float a = use_alpha ? ((float)alpha_key / 255.0f) : 1.0f;
     float r = ((color >> 16) & 0xFFu) / 255.0f;
     float g = ((color >> 8) & 0xFFu) / 255.0f;
     float b = (color & 0xFFu) / 255.0f;
+
+    if (use_alpha) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    }
 
     glUseProgram(prog);
     glActiveTexture(GL_TEXTURE0);
@@ -263,6 +270,9 @@ static void gbm_backend_draw_quad(ltc_gbm_context_t *ctx,
     glVertexAttribPointer(attr_pos, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), verts);
     glVertexAttribPointer(attr_uv, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), verts + 2);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    if (use_alpha) {
+        glDisable(GL_BLEND);
+    }
 }
 
 static void gbm_backend_draw_text(ltc_gbm_context_t *ctx,
@@ -271,6 +281,7 @@ static void gbm_backend_draw_text(ltc_gbm_context_t *ctx,
                                  float y,
                                  float scale,
                                  uint32_t color,
+                                 int use_alpha,
                                  int portrait_mode,
                                  uint32_t logical_width,
                                  uint32_t logical_height)
@@ -311,7 +322,8 @@ static void gbm_backend_draw_text(ltc_gbm_context_t *ctx,
         gbm_backend_draw_quad(ctx, x0, y0, x1, y1,
                              glyph_uv[idx][0], glyph_uv[idx][1],
                              glyph_uv[idx][2], glyph_uv[idx][3],
-                             color, portrait_mode,
+                             color, use_alpha,
+                             portrait_mode,
                              logical_width, logical_height);
 
         if (*p != '.') {
@@ -353,14 +365,14 @@ static void gbm_backend_draw_df_badge(ltc_gbm_context_t *ctx,
     for (size_t i = 0; i < sizeof(d_pts)/sizeof(d_pts[0]); i++) {
         float px = start_x + d_pts[i][0] * dot_step;
         float py = start_y + d_pts[i][1] * dot_step;
-        gbm_backend_draw_text(ctx, ".", px, py, scale, color, portrait_mode, logical_width, logical_height);
+        gbm_backend_draw_text(ctx, ".", px, py, scale, color, 0, portrait_mode, logical_width, logical_height);
     }
 
     float fx0 = start_x + 4.0f * dot_step;
     for (size_t i = 0; i < sizeof(f_pts)/sizeof(f_pts[0]); i++) {
         float px = fx0 + f_pts[i][0] * dot_step;
         float py = start_y + f_pts[i][1] * dot_step;
-        gbm_backend_draw_text(ctx, ".", px, py, scale, color, portrait_mode, logical_width, logical_height);
+        gbm_backend_draw_text(ctx, ".", px, py, scale, color, 0, portrait_mode, logical_width, logical_height);
     }
 }
 
@@ -403,6 +415,7 @@ int gbm_backend_render(ltc_gbm_context_t *ctx, const gbm_render_state_t *state) 
                          state->text_y,
                          state->glyph_scale,
                          0xFF0A0A0A,
+                         0,
                          state->portrait_mode,
                          state->logical_width,
                          state->logical_height);
@@ -415,6 +428,7 @@ int gbm_backend_render(ltc_gbm_context_t *ctx, const gbm_render_state_t *state) 
                                  state->text_y,
                                  state->glyph_scale,
                                  state->fade_from_color,
+                                 1,
                                  state->portrait_mode,
                                  state->logical_width,
                                  state->logical_height);
@@ -425,6 +439,7 @@ int gbm_backend_render(ltc_gbm_context_t *ctx, const gbm_render_state_t *state) 
                                  state->text_y,
                                  state->glyph_scale,
                                  state->fade_to_color,
+                                 1,
                                  state->portrait_mode,
                                  state->logical_width,
                                  state->logical_height);
@@ -435,6 +450,7 @@ int gbm_backend_render(ltc_gbm_context_t *ctx, const gbm_render_state_t *state) 
                              state->text_y,
                              state->glyph_scale,
                              state->target_text_color,
+                             0,
                              state->portrait_mode,
                              state->logical_width,
                              state->logical_height);
@@ -447,6 +463,7 @@ int gbm_backend_render(ltc_gbm_context_t *ctx, const gbm_render_state_t *state) 
                              12.0f,
                              state->overlay_scale,
                              state->overlay_color,
+                             0,
                              state->portrait_mode,
                              state->logical_width,
                              state->logical_height);
@@ -458,6 +475,7 @@ int gbm_backend_render(ltc_gbm_context_t *ctx, const gbm_render_state_t *state) 
                                       state->portrait_mode,
                                       state->logical_width,
                                       state->logical_height);
+
         }
     }
 

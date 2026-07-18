@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-07-18
+
+### Fixed
+- Corrected GBM/EGL fade endpoint alpha handling in `src/display-backend-gbm.c` so zero-alpha crossfade endpoints remain transparent instead of flashing full-brightness.
+- Resolved the visible double-pulse on the outgoing timecode string during LTC/ToD transitions on the GPU render path.
+
 ## Project Timeline (From Scratch)
 
 - 2026-02-27: Initial renderer foundation (DRM/KMS framebuffer + real-time scheduling).
