@@ -635,6 +635,7 @@ int main(int argc, char *argv[]) {
     unsigned int ltc_live_idle_div = read_env_u32("LTC_LIVE_IDLE_DIV", 16, 2, 128);
     uint64_t ltc_live_sleep_min_ns = (uint64_t)read_env_u32("LTC_LIVE_SLEEP_MIN_US", 100, 50, 5000) * 1000ULL;
     uint64_t ltc_live_sleep_max_ns = (uint64_t)read_env_u32("LTC_LIVE_SLEEP_MAX_US", 2000, 100, 10000) * 1000ULL;
+    unsigned int fade_test_period_ms = read_env_u32("LTC_FADE_TEST_PERIOD_MS", 0, 0, 60000);
 
     rtaudio_stream_options_t rta_opts;
     memset(&rta_opts, 0, sizeof(rta_opts));
@@ -743,6 +744,11 @@ int main(int argc, char *argv[]) {
     clock_gettime(CLOCK_BOOTTIME, &ts);
     fflush(stdout);
     printf("[MAIN] Starting render loop at boot+%.3f s\n", ts.tv_sec + ts.tv_nsec/1e9);
+    if (fade_test_period_ms > 0) {
+        printf("[MAIN] Fade test mode enabled: toggling LTC/ToD every %u ms\n",
+               fade_test_period_ms);
+        fflush(stdout);
+    }
 
     while (!should_exit) {
         /* Check if config file has changed */
@@ -972,10 +978,35 @@ int main(int argc, char *argv[]) {
             ltc_frame_to_string_with_tz(&last_ltc_frame, tm_local, timecode_str, sizeof(timecode_str));
         }
 
+        struct timespec ts_loop_mono;
+        clock_gettime(CLOCK_MONOTONIC, &ts_loop_mono);
+        uint64_t loop_mono_ns = (uint64_t)ts_loop_mono.tv_sec * 1000000000ULL + (uint64_t)ts_loop_mono.tv_nsec;
+
         /* Consider LTC live for one second after the latest decoded frame. */
         int ltc_live = has_ltc_frame && ((now - last_ltc_seen) <= 1);
         /* Display source remains LTC until configured loss timeout expires. */
         int display_ltc_active = has_ltc_frame;
+
+        if (fade_test_period_ms > 0) {
+            uint64_t fade_test_period_ns = (uint64_t)fade_test_period_ms * 1000000ULL;
+            int fade_test_ltc_active = ((loop_mono_ns / fade_test_period_ns) & 1ULL) != 0;
+            if (fade_test_ltc_active) {
+                struct timespec ts_wall;
+                clock_gettime(CLOCK_REALTIME, &ts_wall);
+                unsigned int fade_test_frame = (unsigned int)((ts_wall.tv_nsec * LTC_FRAME_RATE) / 1000000000ULL);
+                if (fade_test_frame >= LTC_FRAME_RATE) {
+                    fade_test_frame = LTC_FRAME_RATE - 1;
+                }
+                snprintf(timecode_str, sizeof(timecode_str), "%02d.%02d.%02d.%02u",
+                         tm_local->tm_hour, tm_local->tm_min, tm_local->tm_sec, fade_test_frame);
+                ltc_live = 1;
+                display_ltc_active = 1;
+            } else {
+                ltc_frame_to_string_with_tz(&last_ltc_frame, tm_local, timecode_str, sizeof(timecode_str));
+                ltc_live = 0;
+                display_ltc_active = 0;
+            }
+        }
 
         uint32_t target_text_color;
         if (display_ltc_active) {
@@ -985,10 +1016,6 @@ int main(int argc, char *argv[]) {
                                  (current_config.color_g << 8) |
                                  (current_config.color_b));
         }
-
-        struct timespec ts_loop_mono;
-        clock_gettime(CLOCK_MONOTONIC, &ts_loop_mono);
-        uint64_t loop_mono_ns = (uint64_t)ts_loop_mono.tv_sec * 1000000000ULL + (uint64_t)ts_loop_mono.tv_nsec;
 
         /* Hybrid render gate:
          * - Live LTC: redraw only on fresh decoded frames and visible text changes.

@@ -4,6 +4,9 @@ All notable changes to this project are documented in this file.
 
 ## 2026-07-18
 
+### Added
+- Added `LTC_FADE_TEST_PERIOD_MS` to toggle deterministically between synthetic LTC-style timecode and ToD fallback for fade regression testing without live LTC input.
+
 ### Fixed
 - Corrected GBM/EGL fade endpoint alpha handling in `src/display-backend-gbm.c` so zero-alpha crossfade endpoints remain transparent instead of flashing full-brightness.
 - Resolved the visible double-pulse on the outgoing timecode string during LTC/ToD transitions on the GPU render path.

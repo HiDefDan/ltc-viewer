@@ -44,6 +44,12 @@ Low-latency LTC timecode display appliance for Raspberry Pi CM5 using DRM/KMS fr
 - Generated files: `ltc-live.bmp` and `tod-fallback.bmp` (captured after transition fade completes).
 - Clear the environment override after captures to return to normal operation.
 
+## Debug Fade Test
+
+- Set `LTC_FADE_TEST_PERIOD_MS` to a non-zero value to toggle between synthetic LTC-style timecode and ToD fallback without a live LTC cable.
+- Example: `LTC_FADE_TEST_PERIOD_MS=1000` flips source every second and exercises the same LTC/ToD fade path used in normal runtime.
+- This hook is intended for visual fade regression testing and should be unset for production operation.
+
 ## Boot Slimming Profile
 
 - Current appliance profile keeps `avahi-daemon` (mDNS), `cron`, `systemd-timesyncd` (NTP), `NetworkManager`, `wpa_supplicant`, and `ssh` enabled.
