@@ -471,6 +471,125 @@ static inline void timecode_fade_alphas(uint64_t elapsed_ns, uint64_t duration_n
     *alpha_from = (uint32_t)(fade_out * 255.0 + 0.5);
 }
 
+/* Computes glyph scale and text/background layout for one output's native
+ * fb_width x fb_height (portrait or landscape, whichever the connector's
+ * mode reports) and fills a gbm_render_state_t ready to render. All the
+ * frame *content* (timecode string, colors, fade state, overlay) is shared
+ * across every output and is passed in as-is; only geometry is recomputed
+ * per output, since DSI (portrait) and HDMI (landscape) need independently
+ * scaled/positioned layouts from the same logical content. */
+static void build_output_render_state(gbm_render_state_t *out_state,
+                                      uint32_t fb_width, uint32_t fb_height,
+                                      const ltc_config_t *cfg,
+                                      const char *timecode_str,
+                                      uint32_t target_text_color,
+                                      uint32_t bg_color,
+                                      int source_fade_active,
+                                      const char *fade_from_str, uint32_t fade_from_color,
+                                      const char *fade_to_str, uint32_t fade_to_color,
+                                      int debug_overlay_enabled,
+                                      const char *overlay_str,
+                                      uint32_t overlay_color,
+                                      int df_flag)
+{
+    int portrait_mode = (fb_height > fb_width);
+    uint32_t render_width = portrait_mode ? fb_height : fb_width;
+    uint32_t render_height = portrait_mode ? fb_width : fb_height;
+
+    float base_scale_x = (float)render_width / (float)DISPLAY_WIDTH;
+    float base_scale_y = (float)render_height / (float)DISPLAY_HEIGHT;
+    float base_scale = (base_scale_x < base_scale_y) ? base_scale_x : base_scale_y;
+
+    float target_scale = (float)TIMECODE_FONT_HEIGHT / (float)FONT_GLYPH_HEIGHT;
+    float max_scale_h = (float)render_height / (float)FONT_GLYPH_HEIGHT;
+    float max_scale_bg = (float)render_width / (float)(8 * DISPLAY_DIGIT_WIDTH);
+    float max_safe_scale = (max_scale_h < max_scale_bg) ? max_scale_h : max_scale_bg;
+
+    float glyph_scale = target_scale;
+    if (glyph_scale > max_safe_scale) {
+        glyph_scale = max_safe_scale;
+    }
+    if (glyph_scale <= 0.0f) {
+        glyph_scale = (base_scale > 0.0f) ? base_scale : 1.0f;
+    }
+
+    uint32_t scaled_glyph_height = (uint32_t)(FONT_GLYPH_HEIGHT * glyph_scale + 0.5f);
+    int32_t center_y = (render_height > scaled_glyph_height) ?
+                       (int32_t)((render_height - scaled_glyph_height) / 2) : 0;
+    int32_t text_y_final = center_y + cfg->timecode_y_offset;
+    int32_t min_text_y = 0;
+    int32_t max_text_y = (int32_t)render_height - (int32_t)scaled_glyph_height;
+    if (max_text_y < 0) {
+        max_text_y = 0;
+    }
+    if (text_y_final < min_text_y) {
+        text_y_final = min_text_y;
+    }
+    if (text_y_final > max_text_y) {
+        text_y_final = max_text_y;
+    }
+
+    uint32_t base_string_width = 8 * DISPLAY_DIGIT_WIDTH;
+    uint32_t scaled_string_width = (uint32_t)(base_string_width * glyph_scale + 0.5f);
+    uint32_t scaled_digit_width = (uint32_t)(DISPLAY_DIGIT_WIDTH * glyph_scale + 0.5f);
+    if (scaled_digit_width == 0) {
+        scaled_digit_width = 1;
+    }
+
+    int32_t center_x = (render_width > scaled_string_width) ?
+                       (int32_t)((render_width - scaled_string_width) / 2) : 0;
+    int32_t text_x_final = center_x + cfg->timecode_x_offset;
+    int32_t min_text_x = (int32_t)scaled_digit_width;
+    int32_t max_text_x = (int32_t)render_width - (int32_t)(9 * scaled_digit_width);
+    if (text_x_final < min_text_x) {
+        text_x_final = min_text_x;
+    }
+    if (text_x_final > max_text_x) {
+        text_x_final = max_text_x;
+    }
+    if (text_x_final < 0) {
+        text_x_final = 0;
+    }
+    if ((uint32_t)text_x_final + scaled_string_width > render_width) {
+        text_x_final = (int32_t)(render_width - scaled_string_width);
+        if (text_x_final < 0) {
+            text_x_final = 0;
+        }
+    }
+
+    uint32_t bg_x = ((uint32_t)text_x_final > scaled_digit_width) ?
+        ((uint32_t)text_x_final - scaled_digit_width) : 0;
+
+    float overlay_scale = glyph_scale * 0.23f;
+    if (overlay_scale < 0.08f) {
+        overlay_scale = 0.08f;
+    }
+
+    memset(out_state, 0, sizeof(*out_state));
+    out_state->portrait_mode = portrait_mode;
+    out_state->fb_width = fb_width;
+    out_state->fb_height = fb_height;
+    out_state->logical_width = render_width;
+    out_state->logical_height = render_height;
+    out_state->bg_color = bg_color;
+    out_state->bg_x = bg_x;
+    out_state->text_x = (uint32_t)text_x_final;
+    out_state->text_y = (uint32_t)text_y_final;
+    out_state->glyph_scale = glyph_scale;
+    out_state->timecode_str = timecode_str;
+    out_state->target_text_color = target_text_color;
+    out_state->source_fade_active = source_fade_active;
+    out_state->fade_from_str = fade_from_str;
+    out_state->fade_from_color = fade_from_color;
+    out_state->fade_to_str = fade_to_str;
+    out_state->fade_to_color = fade_to_color;
+    out_state->debug_overlay_enabled = debug_overlay_enabled;
+    out_state->overlay_str = overlay_str;
+    out_state->overlay_color = overlay_color;
+    out_state->overlay_scale = overlay_scale;
+    out_state->df_flag = df_flag;
+}
+
 int main(int argc, char *argv[]) {
     struct timespec ts;
     clock_gettime(CLOCK_BOOTTIME, &ts);
@@ -740,6 +859,7 @@ int main(int argc, char *argv[]) {
     struct timespec last_smooth_ts = {0};
     int smooth_clock_init = 0;
     double smooth_budget_frames = 0.0;
+    uint64_t last_hotplug_poll_mono_ns = 0;
 
     clock_gettime(CLOCK_BOOTTIME, &ts);
     fflush(stdout);
@@ -751,6 +871,19 @@ int main(int argc, char *argv[]) {
     }
 
     while (!should_exit) {
+        /* Rescan for HDMI connect/disconnect roughly once a second — no
+         * faster, since a cable can't physically change state quicker than
+         * that and the DRM ioctls involved aren't worth doing every frame. */
+        {
+            struct timespec ts_hotplug;
+            clock_gettime(CLOCK_MONOTONIC, &ts_hotplug);
+            uint64_t now_mono_ns = (uint64_t)ts_hotplug.tv_sec * 1000000000ULL + (uint64_t)ts_hotplug.tv_nsec;
+            if (now_mono_ns - last_hotplug_poll_mono_ns >= 1000000000ULL) {
+                last_hotplug_poll_mono_ns = now_mono_ns;
+                display_backend_poll_hotplug(&g_backend);
+            }
+        }
+
         /* Check if config file has changed */
         if (config_watcher_check(&config_watcher) > 0) {
             printf("[MAIN] Config file changed, reloading...\n");
@@ -1173,33 +1306,42 @@ int main(int argc, char *argv[]) {
             }
 
             if (g_backend.type == DISPLAY_BACKEND_GBM) {
-                gbm_render_state_t gbm_state = {0};
-                gbm_state.portrait_mode = portrait_mode;
-                gbm_state.fb_width = fb_width;
-                gbm_state.fb_height = fb_height;
-                gbm_state.logical_width = render_width;
-                gbm_state.logical_height = render_height;
-                gbm_state.bg_color = bg_color;
-                gbm_state.bg_x = bg_x;
-                gbm_state.text_x = (uint32_t)text_x_final;
-                gbm_state.text_y = (uint32_t)text_y_final;
-                gbm_state.glyph_scale = glyph_scale;
-                gbm_state.timecode_str = timecode_str;
-                gbm_state.target_text_color = target_text_color;
-                gbm_state.source_fade_active = source_fade_active;
-                gbm_state.fade_from_str = fade_from_str;
-                gbm_state.fade_from_color = from_color;
-                gbm_state.fade_to_str = fade_to_str;
-                gbm_state.fade_to_color = to_color;
-                gbm_state.debug_overlay_enabled = current_config.debug_overlay_enabled;
-                gbm_state.overlay_str = overlay_str;
-                gbm_state.overlay_color = overlay_color;
-                gbm_state.overlay_scale = overlay_scale;
-                gbm_state.df_flag = df_flag;
+                int primary_failed = 0;
+                int output_slots = display_backend_output_count(&g_backend);
+                for (int out_idx = 0; out_idx < output_slots; out_idx++) {
+                    if (!display_backend_output_active(&g_backend, out_idx)) {
+                        continue;
+                    }
 
-                if (display_backend_render(&g_backend, &gbm_state)) {
-                    fprintf(stderr, "[MAIN] GPU render failed\n");
-                    fflush(stderr);
+                    uint32_t out_fb_width = display_backend_output_width(&g_backend, out_idx);
+                    uint32_t out_fb_height = display_backend_output_height(&g_backend, out_idx);
+
+                    gbm_render_state_t gbm_state;
+                    build_output_render_state(&gbm_state, out_fb_width, out_fb_height, &current_config,
+                                               timecode_str, target_text_color, bg_color,
+                                               source_fade_active,
+                                               fade_from_str, from_color,
+                                               fade_to_str, to_color,
+                                               current_config.debug_overlay_enabled,
+                                               overlay_str, overlay_color, (int)df_flag);
+
+                    if (display_backend_render_output(&g_backend, out_idx, &gbm_state) != 0 ||
+                        display_backend_flip_output(&g_backend, out_idx) != 0) {
+                        if (out_idx == 0) {
+                            fprintf(stderr, "[MAIN] GPU render/flip failed on primary output\n");
+                            fflush(stderr);
+                            primary_failed = 1;
+                            break;
+                        }
+                        /* A secondary HDMI output failing (e.g. mid-unplug
+                         * race lost to the next hotplug poll) must not take
+                         * the permanent DSI panel down with it. */
+                        fprintf(stderr, "[MAIN] Output %d render/flip failed, deactivating\n", out_idx);
+                        fflush(stderr);
+                        display_backend_deactivate_output(&g_backend, out_idx);
+                    }
+                }
+                if (primary_failed) {
                     break;
                 }
 
@@ -1461,7 +1603,10 @@ int main(int argc, char *argv[]) {
                 first_frame = 0;
             }
 
-            if (display_backend_page_flip_sync(&g_backend)) {
+            /* GBM outputs already flipped per-output above; this generic
+             * single-output call only applies to the legacy DRM backend. */
+            if (g_backend.type != DISPLAY_BACKEND_GBM &&
+                display_backend_page_flip_sync(&g_backend)) {
                 fprintf(stderr, "[MAIN] Page flip failed\n");
                 fflush(stderr);
                 break;

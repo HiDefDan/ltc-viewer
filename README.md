@@ -14,12 +14,13 @@ Low-latency LTC timecode display appliance for Raspberry Pi CM5 using DRM/KMS fr
 
 ## Display Behavior
 
-- DSI output is fixed at 60 Hz.
-- Portrait DSI panels now use per-glyph UV rotation in the GBM/EGL backend so text renders upright instead of stacked.
-- GBM/EGL LTC/ToD fades now preserve zero-alpha endpoints correctly, eliminating the two full-brightness flashes that could appear at transition start/end.
-- HDMI output may be configured separately for dynamic-refresh workflows.
+- DSI output is fixed at 60 Hz and is always the primary/permanent display.
+- The renderer now drives DSI **and** any connected HDMI output simultaneously — HDMI is no longer a DSI-absent fallback only. HDMI is detected live: plugging in a cable activates it within about a second (no service restart needed), and unplugging cleanly tears it back down without affecting the DSI panel.
+- Each output renders the same LTC/ToD content natively in its own connector's preferred mode and orientation — the DSI panel keeps its portrait per-glyph UV rotation, while HDMI lays the timecode out full-size in its own landscape resolution (not a letterboxed copy of the DSI canvas). HDMI always uses its EDID-preferred mode; the configured `display_width`/`display_height`/`refresh_hz` apply to DSI only.
+- Portrait DSI panels use per-glyph UV rotation in the GBM/EGL backend so text renders upright instead of stacked.
+- GBM/EGL LTC/ToD fades preserve zero-alpha endpoints correctly, eliminating the two full-brightness flashes that could appear at transition start/end.
 - LTC decode and update cadence is independent from panel scanout timing.
-- Diagnostic tip: verify the active DRM path with `sudo lsof -c ltc-timecode | grep /dev/dri` and compare against `/sys/class/drm/card0-DSI-1/status` and `/sys/class/drm/card2-HDMI-A-*/status` to confirm which connector the renderer is using.
+- Diagnostic tip: verify the active DRM outputs with `sudo lsof -c ltc-timecode | grep /dev/dri` and compare against `/sys/class/drm/card0-DSI-1/status` and `/sys/class/drm/card2-HDMI-A-*/status` to confirm which connectors the renderer is using; `[GBM] Output N activated/deactivated` lines in the journal log hotplug transitions.
 
 ## Hardware Baseline
 

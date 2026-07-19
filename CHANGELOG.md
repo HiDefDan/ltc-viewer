@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-07-19
+
+### Added
+- Simultaneous DSI + HDMI rendering: the GBM/EGL backend now drives the DSI panel and any connected HDMI output(s) at the same time, instead of only ever scanning out to one connector (DSI preferred, HDMI as a DSI-absent fallback). `src/display-backend-gbm.c` now splits into a shared `ltc_gbm_device_t` (one DRM fd/GBM device/EGL display per process) and per-connector `ltc_gbm_output_t` entries; every output past the first shares the primary output's EGL context (`eglCreateContext` share-context) so the font atlas texture and glyph shader are built once and reused across all outputs.
+- Live HDMI hotplug: `gbm_backend_poll_hotplug()` / `display_backend_poll_hotplug()` rescans known HDMI connector ids roughly once a second from the main render loop and activates/deactivates outputs on connect/disconnect, with no service restart required.
+- Each output renders the shared LTC/ToD content laid out natively for its own connector mode (`src/main.c`'s `build_output_render_state()`) — DSI keeps its configured portrait mode, HDMI always self-selects its EDID-preferred landscape mode.
+- A failing secondary HDMI output (e.g. an unplug race) is deactivated and skipped without affecting DSI rendering; only a primary-output failure is treated as fatal, matching prior single-display behavior.
+
+### Changed
+- `find_display_connector()` (single-connector selection) replaced by `enumerate_connectors()` + `find_crtc_for_connector()` with a CRTC exclusion list, so a second connector never gets assigned a CRTC already claimed by another active output.
+
 ## 2026-07-18
 
 ### Added
