@@ -83,6 +83,35 @@ legend {
     width: 100%;
 }
 
+.hdmi-positions-container {
+    margin-top: 8px;
+}
+
+.hdmi-positions-container .empty-note {
+    color: #888;
+    font-size: 13px;
+    font-style: italic;
+}
+
+.hdmi-port-block {
+    border-top: 1px solid #333;
+    padding-top: 10px;
+    margin-top: 12px;
+}
+
+.hdmi-port-block:first-child {
+    border-top: none;
+    padding-top: 0;
+    margin-top: 0;
+}
+
+.hdmi-port-title {
+    font-weight: 600;
+    font-size: 13px;
+    color: #c0c0c0;
+    margin-bottom: 8px;
+}
+
 label {
     display: block;
     margin-bottom: 6px;

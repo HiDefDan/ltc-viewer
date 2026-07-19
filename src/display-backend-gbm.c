@@ -723,6 +723,7 @@ static int activate_output(ltc_gbm_context_t *ctx, int idx, int fd, uint32_t con
     out->drm_fd = fd;
     out->connector_id = connector_id;
     out->connector_type = conn->connector_type;
+    out->connector_type_id = conn->connector_type_id;
 
     drmModeModeInfo *mode = find_mode(conn, target_width, target_height, target_refresh);
     if (!mode) {
@@ -1155,6 +1156,16 @@ uint32_t gbm_backend_output_height(const ltc_gbm_context_t *ctx, int idx) {
 float gbm_backend_output_refresh_hz(const ltc_gbm_context_t *ctx, int idx) {
     if (!ctx || idx < 0 || idx >= ctx->output_count) return 0.0f;
     return ctx->outputs[idx].refresh_hz;
+}
+
+uint32_t gbm_backend_output_connector_type(const ltc_gbm_context_t *ctx, int idx) {
+    if (!ctx || idx < 0 || idx >= ctx->output_count) return 0;
+    return ctx->outputs[idx].connector_type;
+}
+
+uint32_t gbm_backend_output_connector_type_id(const ltc_gbm_context_t *ctx, int idx) {
+    if (!ctx || idx < 0 || idx >= ctx->output_count) return 0;
+    return ctx->outputs[idx].connector_type_id;
 }
 
 uint32_t gbm_backend_back_width(const ltc_gbm_context_t *ctx) {

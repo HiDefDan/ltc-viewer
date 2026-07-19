@@ -43,6 +43,7 @@ static int handle_get_tzdata(struct MHD_Connection *conn);
 static int handle_get_ntp_status(struct MHD_Connection *conn);
 static int handle_get_ntp_servers(struct MHD_Connection *conn);
 static int handle_get_display_modes(struct MHD_Connection *conn);
+static int handle_get_hdmi_ports(struct MHD_Connection *conn);
 static int handle_post_network_vlan(struct MHD_Connection *conn, const char *upload_data,
                                      size_t *upload_data_size, void **con_cls);
 
@@ -996,6 +997,136 @@ static int handle_get_display_modes(struct MHD_Connection *conn) {
     return send_response(conn, response, strlen(response), MHD_HTTP_OK, "application/json");
 }
 
+#define MAX_HDMI_PORTS_REPORTED 8
+
+typedef struct {
+    char name[32];
+    uint32_t width;
+    uint32_t height;
+    float refresh;
+} hdmi_port_info_t;
+
+/* Scans every /dev/dri/cardN with usable KMS resources for currently
+ * CONNECTED HDMI-type connectors. DSI and HDMI can live on entirely
+ * separate DRM devices on Pi5/CM5-class hardware (RP1's own DSI controller
+ * vs the main SoC's vc4-drm), so this can't stop at the first working card
+ * the way handle_get_display_modes does. */
+static int scan_connected_hdmi_ports(hdmi_port_info_t *ports, int max_ports) {
+    int found = 0;
+    for (int i = 0; i < 16 && found < max_ports; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/dev/dri/card%d", i);
+        int fd = open(path, O_RDWR);
+        if (fd < 0) continue;
+
+        drmModeRes *res = drmModeGetResources(fd);
+        if (!res) {
+            close(fd);
+            continue;
+        }
+
+        for (int c = 0; c < res->count_connectors && found < max_ports; c++) {
+            drmModeConnector *conn_drm = drmModeGetConnector(fd, res->connectors[c]);
+            if (!conn_drm) continue;
+
+            if ((conn_drm->connector_type == DRM_MODE_CONNECTOR_HDMIA ||
+                 conn_drm->connector_type == DRM_MODE_CONNECTOR_HDMIB) &&
+                conn_drm->connection == DRM_MODE_CONNECTED &&
+                conn_drm->count_modes > 0) {
+                drm_connector_name(conn_drm->connector_type, conn_drm->connector_type_id,
+                                    ports[found].name, sizeof(ports[found].name));
+
+                drmModeModeInfo *mode = &conn_drm->modes[0];
+                for (int m = 0; m < conn_drm->count_modes; m++) {
+                    if (conn_drm->modes[m].type & DRM_MODE_TYPE_PREFERRED) {
+                        mode = &conn_drm->modes[m];
+                        break;
+                    }
+                }
+                ports[found].width = mode->hdisplay;
+                ports[found].height = mode->vdisplay;
+                ports[found].refresh = mode_refresh_hz(mode);
+                found++;
+            }
+            drmModeFreeConnector(conn_drm);
+        }
+
+        drmModeFreeResources(res);
+        close(fd);
+    }
+    return found;
+}
+
+static int handle_get_hdmi_ports(struct MHD_Connection *conn) {
+    hdmi_port_info_t ports[MAX_HDMI_PORTS_REPORTED];
+    int count = scan_connected_hdmi_ports(ports, MAX_HDMI_PORTS_REPORTED);
+
+    char response[2048];
+    char *pos = response;
+    int remaining = sizeof(response);
+    int written = snprintf(pos, remaining, "{\"ports\":[");
+    pos += written;
+    remaining -= written;
+
+    for (int i = 0; i < count; i++) {
+        written = snprintf(pos, remaining,
+                           "%s{\"name\":\"%s\",\"width\":%u,\"height\":%u,\"refresh\":%.2f}",
+                           i > 0 ? "," : "",
+                           ports[i].name, ports[i].width, ports[i].height, ports[i].refresh);
+        pos += written;
+        remaining -= written;
+    }
+    snprintf(pos, remaining, "]}");
+
+    return send_response(conn, response, strlen(response), MHD_HTTP_OK, "application/json");
+}
+
+static char last_hdmi_ports_signature[512] = "";
+
+/* Called periodically from broadcast_thread_func (same thread/cadence as
+ * broadcast_network_stats). Only pushes a WS message when the connected
+ * HDMI port set actually changes, so the web UI's per-port position
+ * sections update live without polling. */
+static void broadcast_hdmi_ports_if_changed(void) {
+    hdmi_port_info_t ports[MAX_HDMI_PORTS_REPORTED];
+    int count = scan_connected_hdmi_ports(ports, MAX_HDMI_PORTS_REPORTED);
+
+    char signature[512];
+    char *sp = signature;
+    int sremaining = sizeof(signature);
+    for (int i = 0; i < count; i++) {
+        int written = snprintf(sp, sremaining, "%s:%ux%u@%.2f;",
+                               ports[i].name, ports[i].width, ports[i].height, ports[i].refresh);
+        if (written < 0 || written >= sremaining) break;
+        sp += written;
+        sremaining -= written;
+    }
+
+    if (strcmp(signature, last_hdmi_ports_signature) == 0) {
+        return;
+    }
+    strncpy(last_hdmi_ports_signature, signature, sizeof(last_hdmi_ports_signature) - 1);
+    last_hdmi_ports_signature[sizeof(last_hdmi_ports_signature) - 1] = '\0';
+
+    char json_data[2048];
+    char *jp = json_data;
+    int jremaining = sizeof(json_data);
+    int written = snprintf(jp, jremaining, "{\"type\":\"hdmi_ports\",\"ports\":[");
+    jp += written;
+    jremaining -= written;
+    for (int i = 0; i < count; i++) {
+        written = snprintf(jp, jremaining,
+                           "%s{\"name\":\"%s\",\"width\":%u,\"height\":%u,\"refresh\":%.2f}",
+                           i > 0 ? "," : "",
+                           ports[i].name, ports[i].width, ports[i].height, ports[i].refresh);
+        jp += written;
+        jremaining -= written;
+    }
+    snprintf(jp, jremaining, "]}");
+
+    broadcast_ws_message(json_data);
+}
+
 static int handle_post_network_vlan(struct MHD_Connection *conn, const char *upload_data,
                                     size_t *upload_data_size, void **con_cls) {
     struct connection_info *con_info = *con_cls;
@@ -1202,6 +1333,9 @@ static int request_handler(void *cls, struct MHD_Connection *conn,
     if (strcmp(url, "/api/display-modes") == 0) {
         return handle_get_display_modes(conn);
     }
+    if (strcmp(url, "/api/hdmi-ports") == 0) {
+        return handle_get_hdmi_ports(conn);
+    }
     if (strcmp(url, "/api/network/vlan") == 0) {
         if (strcmp(method, "POST") == 0) {
             return handle_post_network_vlan(conn, upload_data, upload_data_size, con_cls);
@@ -1237,6 +1371,7 @@ static void *broadcast_thread_func(void *arg) {
         sleep(2);
         if (ws_running) {
             broadcast_network_stats();
+            broadcast_hdmi_ports_if_changed();
         }
     }
     return NULL;

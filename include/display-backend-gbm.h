@@ -79,6 +79,7 @@ typedef struct {
     int drm_fd; /* which ltc_gbm_device_t (by drm_fd) this output scans out on */
     uint32_t connector_id;
     uint32_t connector_type;
+    uint32_t connector_type_id; /* per-type instance number, e.g. "1" in HDMI-A-1 */
     uint32_t crtc_id;
     drmModeModeInfo mode;
     struct gbm_surface *gbm_surf;
@@ -136,6 +137,8 @@ int gbm_backend_output_active(const ltc_gbm_context_t *ctx, int idx);
 uint32_t gbm_backend_output_width(const ltc_gbm_context_t *ctx, int idx);
 uint32_t gbm_backend_output_height(const ltc_gbm_context_t *ctx, int idx);
 float gbm_backend_output_refresh_hz(const ltc_gbm_context_t *ctx, int idx);
+uint32_t gbm_backend_output_connector_type(const ltc_gbm_context_t *ctx, int idx);
+uint32_t gbm_backend_output_connector_type_id(const ltc_gbm_context_t *ctx, int idx);
 int gbm_backend_render_output(ltc_gbm_context_t *ctx, int idx, const gbm_render_state_t *state);
 int gbm_backend_flip_output(ltc_gbm_context_t *ctx, int idx);
 

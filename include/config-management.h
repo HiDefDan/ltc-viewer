@@ -2,6 +2,22 @@
 #define CONFIG_MANAGEMENT_H
 
 #include <time.h>
+#include <stddef.h>
+#include <stdint.h>
+
+/* DSI is permanently locked to true center (no user-adjustable offset).
+ * HDMI is repositionable per physical port, keyed by a stable name like
+ * "HDMI-A-1" (see drm_connector_name()) so a saved offset survives
+ * unplug/replug and reboot, and different ports can have different
+ * offsets. Raspberry Pi CM5-class hardware exposes at most a couple of
+ * independent HDMI ports, so this is generous headroom. */
+#define LTC_MAX_HDMI_POSITIONS 4
+
+typedef struct {
+    char name[32];   // e.g. "HDMI-A-1", matches drm_connector_name()
+    int x_offset;
+    int y_offset;
+} hdmi_position_t;
 
 typedef struct {
     char timezone[256];           // e.g., "Europe/London"
@@ -10,8 +26,8 @@ typedef struct {
     int display_width;            // Target display width (mode width)
     int display_height;           // Target display height (mode height)
     float refresh_hz;             // Display refresh rate (e.g., 50.0, 59.94, 60.0)
-    int timecode_x_offset;        // X offset in pixels from horizontal center (±)
-    int timecode_y_offset;        // Y offset in pixels from vertical center (±)
+    int hdmi_position_count;
+    hdmi_position_t hdmi_positions[LTC_MAX_HDMI_POSITIONS];
     int color_r;                  // Red component
     int color_g;                  // Green component
     int color_b;                  // Blue component
@@ -64,5 +80,26 @@ char* config_to_json(const ltc_config_t *config);
  * Returns 0 on success, -1 on error
  */
 int config_from_json(const char *json_str, ltc_config_t *config);
+
+/**
+ * Look up a saved HDMI port's offset by name. Writes 0,0 and returns 0 if
+ * the port has no saved entry yet; returns 1 if found.
+ */
+int config_get_hdmi_offset(const ltc_config_t *config, const char *name, int *x_offset, int *y_offset);
+
+/**
+ * Save (or update) a named HDMI port's offset. Finds an existing entry by
+ * name, or creates one in the first free slot; if the table is full,
+ * overwrites slot 0 (logged to stderr) rather than silently dropping data.
+ */
+void config_set_hdmi_offset(ltc_config_t *config, const char *name, int x_offset, int y_offset);
+
+/**
+ * Builds a stable per-port name (e.g. "HDMI-A-1") from a DRM connector's
+ * type + type_id, matching the naming convention already used under
+ * /sys/class/drm/cardX-HDMI-A-N/status. connector_type values are the
+ * DRM_MODE_CONNECTOR_* constants from <xf86drmMode.h>.
+ */
+void drm_connector_name(uint32_t connector_type, uint32_t connector_type_id, char *out, size_t out_size);
 
 #endif // CONFIG_MANAGEMENT_H

@@ -2,16 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
-## 2026-07-19
+## 2026-07-19 (2)
 
 ### Added
-- Simultaneous DSI + HDMI rendering: the GBM/EGL backend now drives the DSI panel and any connected HDMI output(s) at the same time, instead of only ever scanning out to one connector (DSI preferred, HDMI as a DSI-absent fallback). `src/display-backend-gbm.c` now splits into a shared `ltc_gbm_device_t` (one DRM fd/GBM device/EGL display per process) and per-connector `ltc_gbm_output_t` entries; every output past the first shares the primary output's EGL context (`eglCreateContext` share-context) so the font atlas texture and glyph shader are built once and reused across all outputs.
-- Live HDMI hotplug: `gbm_backend_poll_hotplug()` / `display_backend_poll_hotplug()` rescans known HDMI connector ids roughly once a second from the main render loop and activates/deactivates outputs on connect/disconnect, with no service restart required.
+- Per-HDMI-port repositioning: each connected HDMI display can now be positioned independently, keyed by its stable port name (`drm_connector_name()`, e.g. `HDMI-A-1`) via new `hdmi_positions[]` entries in `ltc_config_t` (`include/config-management.h`, `src/config-management.c`). DSI is permanently locked to center and is no longer user-adjustable at all — the old shared `timecode_x_offset`/`timecode_y_offset` fields are removed.
+- `ltc-config-daemon` gained `/api/hdmi-ports` (lists every currently-connected HDMI port + its mode across every DRM device, not just the first) and pushes `{"type":"hdmi_ports",...}` over the existing config WebSocket whenever the connected set changes, so the web UI's per-port position sections update live with no page reload.
+- The web UI's Display Settings section now renders one position control block per currently-attached HDMI port dynamically, seeded from saved config and updated live via WebSocket.
+
+### Fixed
+- Corrected the background layer's horizontal position in `build_output_render_state()` (`src/main.c`): the "88.88.88.88." background now starts at the same x as the lit `HH.MM.SS.FF` text (previously offset one full digit-width to the left), so lit and unlit digits line up 1:1. The background's only remaining decorative difference from the lit text is its trailing 4th period — a real 7-segment display's unlit final decimal point — which has zero glyph width and doesn't affect layout.
+- Horizontal centering is plain bounding-box centering of the 8-digit string (unchanged from before this file's HDMI work started) — an intermediate attempt anchored on the literal draw position of the 2nd `.` instead of the 8-digit block's true midpoint, which shifted the whole string a full digit-width right of center; reverted once the background-alignment fix above made the underlying asymmetry-driving concern moot.
+- Fixed the underlying multi-output implementation from earlier today for real Pi5/CM5 hardware topology: DSI and HDMI are driven by **separate DRM devices** (`drm-rp1-dsi` on the RP1 southbridge vs `vc4-drm` on the main SoC), not one shared device as originally assumed. `src/display-backend-gbm.c` now opens one `ltc_gbm_device_t` (GBM device + EGL display) per physical `/dev/dri/cardN` actually in use, and each output carries its own font atlas texture/shader — copied from a same-device sibling output when one exists, built fresh otherwise. HDMI connector discovery now scans every KMS-capable card instead of stopping at the first one that opens successfully.
+
+## 2026-07-19 (1)
+
+### Added
+- Simultaneous DSI + HDMI rendering: the GBM/EGL backend now drives the DSI panel and any connected HDMI output(s) at the same time, instead of only ever scanning out to one connector (DSI preferred, HDMI as a DSI-absent fallback).
+- Live HDMI hotplug: `gbm_backend_poll_hotplug()` / `display_backend_poll_hotplug()` rescans known HDMI connectors roughly once a second from the main render loop and activates/deactivates outputs on connect/disconnect, with no service restart required.
 - Each output renders the shared LTC/ToD content laid out natively for its own connector mode (`src/main.c`'s `build_output_render_state()`) — DSI keeps its configured portrait mode, HDMI always self-selects its EDID-preferred landscape mode.
 - A failing secondary HDMI output (e.g. an unplug race) is deactivated and skipped without affecting DSI rendering; only a primary-output failure is treated as fatal, matching prior single-display behavior.
 
 ### Changed
-- `find_display_connector()` (single-connector selection) replaced by `enumerate_connectors()` + `find_crtc_for_connector()` with a CRTC exclusion list, so a second connector never gets assigned a CRTC already claimed by another active output.
+- `find_display_connector()` (single-connector selection) replaced by connector enumeration + `find_crtc_for_connector()` with a CRTC exclusion list, so a second connector never gets assigned a CRTC already claimed by another active output. (Superseded later the same day — see above — once real hardware showed DSI/HDMI are on different DRM devices entirely.)
 
 ## 2026-07-18
 

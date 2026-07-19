@@ -1,10 +1,10 @@
 #include "config-management.h"
 #include "config.h"
-#include "font.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <xf86drmMode.h>
 
 static void clamp_config_values(ltc_config_t *config) {
     if (config->display_width <= 0 || config->display_width > 7680) {
@@ -14,63 +14,69 @@ static void clamp_config_values(ltc_config_t *config) {
         config->display_height = DISPLAY_HEIGHT;
     }
 
-    float scale_x = (float)config->display_width / (float)DISPLAY_WIDTH;
-    float scale_y = (float)config->display_height / (float)DISPLAY_HEIGHT;
-    float scale = (scale_x < scale_y) ? scale_x : scale_y;
-    if (scale <= 0.0f) {
-        scale = 1.0f;
+    if (config->hdmi_position_count < 0) {
+        config->hdmi_position_count = 0;
     }
-
-    int scaled_glyph_height = (int)(FONT_GLYPH_HEIGHT * scale + 0.5f);
-    if (scaled_glyph_height < 1) {
-        scaled_glyph_height = 1;
+    if (config->hdmi_position_count > LTC_MAX_HDMI_POSITIONS) {
+        config->hdmi_position_count = LTC_MAX_HDMI_POSITIONS;
     }
-    if (scaled_glyph_height > config->display_height) {
-        scaled_glyph_height = config->display_height;
+    for (int i = 0; i < config->hdmi_position_count; i++) {
+        if (config->hdmi_positions[i].x_offset < -10000) config->hdmi_positions[i].x_offset = -10000;
+        if (config->hdmi_positions[i].x_offset > 10000) config->hdmi_positions[i].x_offset = 10000;
+        if (config->hdmi_positions[i].y_offset < -10000) config->hdmi_positions[i].y_offset = -10000;
+        if (config->hdmi_positions[i].y_offset > 10000) config->hdmi_positions[i].y_offset = 10000;
     }
+}
 
-    /* Allow Y offset up to ±(height - glyph_height) / 2 to keep text in bounds */
-    int max_y_offset = (config->display_height - scaled_glyph_height) / 2;
-    if (max_y_offset < 0) max_y_offset = 0;
-
-    if (config->timecode_y_offset < -max_y_offset) {
-        config->timecode_y_offset = -max_y_offset;
+int config_get_hdmi_offset(const ltc_config_t *config, const char *name, int *x_offset, int *y_offset) {
+    *x_offset = 0;
+    *y_offset = 0;
+    if (!config || !name) {
+        return 0;
     }
-    if (config->timecode_y_offset > max_y_offset) {
-        config->timecode_y_offset = max_y_offset;
+    for (int i = 0; i < config->hdmi_position_count; i++) {
+        if (strcmp(config->hdmi_positions[i].name, name) == 0) {
+            *x_offset = config->hdmi_positions[i].x_offset;
+            *y_offset = config->hdmi_positions[i].y_offset;
+            return 1;
+        }
     }
+    return 0;
+}
 
-    /*
-     * Keep full background pattern in bounds.
-     * Timecode is centered over 8 digits (HH.MM.SS.FF), while background is
-     * "8.8.8.8.8.8.8.8." and starts one digit width to the left.
-     */
-    int scaled_digit_width = (int)(DISPLAY_DIGIT_WIDTH * scale + 0.5f);
-    if (scaled_digit_width < 1) {
-        scaled_digit_width = 1;
+void config_set_hdmi_offset(ltc_config_t *config, const char *name, int x_offset, int y_offset) {
+    if (!config || !name) {
+        return;
     }
-
-    int scaled_timecode_width = 8 * scaled_digit_width;
-    int center_x = (config->display_width > scaled_timecode_width) ?
-                   ((config->display_width - scaled_timecode_width) / 2) : 0;
-
-    int min_text_x = scaled_digit_width;
-    int max_text_x = config->display_width - (9 * scaled_digit_width);
-
-    int max_left = center_x - min_text_x;
-    int max_right = max_text_x - center_x;
-
-    int max_x_offset = (max_left < max_right) ? max_left : max_right;
-    if (max_x_offset < 0) {
-        max_x_offset = 0;
+    for (int i = 0; i < config->hdmi_position_count; i++) {
+        if (strcmp(config->hdmi_positions[i].name, name) == 0) {
+            config->hdmi_positions[i].x_offset = x_offset;
+            config->hdmi_positions[i].y_offset = y_offset;
+            return;
+        }
     }
+    int slot = config->hdmi_position_count < LTC_MAX_HDMI_POSITIONS ? config->hdmi_position_count : 0;
+    if (slot == 0 && config->hdmi_position_count >= LTC_MAX_HDMI_POSITIONS) {
+        fprintf(stderr, "[CONFIG] HDMI position table full, overwriting slot 0 (%s)\n",
+                config->hdmi_positions[0].name);
+    } else {
+        config->hdmi_position_count++;
+    }
+    strncpy(config->hdmi_positions[slot].name, name, sizeof(config->hdmi_positions[slot].name) - 1);
+    config->hdmi_positions[slot].name[sizeof(config->hdmi_positions[slot].name) - 1] = '\0';
+    config->hdmi_positions[slot].x_offset = x_offset;
+    config->hdmi_positions[slot].y_offset = y_offset;
+}
 
-    if (config->timecode_x_offset < -max_x_offset) {
-        config->timecode_x_offset = -max_x_offset;
+void drm_connector_name(uint32_t connector_type, uint32_t connector_type_id, char *out, size_t out_size) {
+    const char *type_name;
+    switch (connector_type) {
+        case DRM_MODE_CONNECTOR_HDMIA: type_name = "HDMI-A"; break;
+        case DRM_MODE_CONNECTOR_HDMIB: type_name = "HDMI-B"; break;
+        case DRM_MODE_CONNECTOR_DSI:   type_name = "DSI"; break;
+        default:                       type_name = "Connector"; break;
     }
-    if (config->timecode_x_offset > max_x_offset) {
-        config->timecode_x_offset = max_x_offset;
-    }
+    snprintf(out, out_size, "%s-%u", type_name, connector_type_id);
 }
 
 void config_default(ltc_config_t *config) {
@@ -80,8 +86,8 @@ void config_default(ltc_config_t *config) {
     config->display_width = DISPLAY_WIDTH;
     config->display_height = DISPLAY_HEIGHT;
     config->refresh_hz = TARGET_REFRESH_HZ;
-    config->timecode_x_offset = 0; /* Centered horizontally */
-    config->timecode_y_offset = 0; /* Centered vertically */
+    config->hdmi_position_count = 0;
+    memset(config->hdmi_positions, 0, sizeof(config->hdmi_positions));
     config->color_r = 64;
     config->color_g = 255;
     config->color_b = 64;
@@ -208,8 +214,20 @@ int config_from_json(const char *json_str, ltc_config_t *config) {
     json_extract_int(json_str, "display_width", &config->display_width);
     json_extract_int(json_str, "display_height", &config->display_height);
     json_extract_float(json_str, "refresh_hz", &config->refresh_hz);
-    json_extract_int(json_str, "timecode_x_offset", &config->timecode_x_offset);
-    json_extract_int(json_str, "timecode_y_offset", &config->timecode_y_offset);
+
+    json_extract_int(json_str, "hdmi_position_count", &config->hdmi_position_count);
+    if (config->hdmi_position_count < 0) config->hdmi_position_count = 0;
+    if (config->hdmi_position_count > LTC_MAX_HDMI_POSITIONS) config->hdmi_position_count = LTC_MAX_HDMI_POSITIONS;
+    for (int i = 0; i < config->hdmi_position_count; i++) {
+        char key[32];
+        snprintf(key, sizeof(key), "hdmi_pos%d_name", i);
+        json_extract_string(json_str, key, config->hdmi_positions[i].name, sizeof(config->hdmi_positions[i].name));
+        snprintf(key, sizeof(key), "hdmi_pos%d_x_offset", i);
+        json_extract_int(json_str, key, &config->hdmi_positions[i].x_offset);
+        snprintf(key, sizeof(key), "hdmi_pos%d_y_offset", i);
+        json_extract_int(json_str, key, &config->hdmi_positions[i].y_offset);
+    }
+
     json_extract_int(json_str, "color_r", &config->color_r);
     json_extract_int(json_str, "color_g", &config->color_g);
     json_extract_int(json_str, "color_b", &config->color_b);
@@ -238,10 +256,26 @@ int config_from_json(const char *json_str, ltc_config_t *config) {
 }
 
 char* config_to_json(const ltc_config_t *config) {
-    char *json = malloc(4096);
+    char hdmi_pos_json[LTC_MAX_HDMI_POSITIONS * 96 + 32] = {0};
+    char *hp = hdmi_pos_json;
+    size_t hp_remaining = sizeof(hdmi_pos_json);
+    for (int i = 0; i < config->hdmi_position_count && i < LTC_MAX_HDMI_POSITIONS; i++) {
+        int written = snprintf(hp, hp_remaining,
+            "  \"hdmi_pos%d_name\": \"%s\",\n"
+            "  \"hdmi_pos%d_x_offset\": %d,\n"
+            "  \"hdmi_pos%d_y_offset\": %d,\n",
+            i, config->hdmi_positions[i].name,
+            i, config->hdmi_positions[i].x_offset,
+            i, config->hdmi_positions[i].y_offset);
+        if (written < 0 || (size_t)written >= hp_remaining) break;
+        hp += written;
+        hp_remaining -= (size_t)written;
+    }
+
+    char *json = malloc(4096 + sizeof(hdmi_pos_json));
     if (!json) return NULL;
-    
-    snprintf(json, 4096,
+
+    snprintf(json, 4096 + sizeof(hdmi_pos_json),
         "{\n"
         "  \"timezone\": \"%s\",\n"
         "  \"ntp_server\": \"%s\",\n"
@@ -249,8 +283,8 @@ char* config_to_json(const ltc_config_t *config) {
         "  \"display_width\": %d,\n"
         "  \"display_height\": %d,\n"
         "  \"refresh_hz\": %.2f,\n"
-        "  \"timecode_x_offset\": %d,\n"
-        "  \"timecode_y_offset\": %d,\n"
+        "  \"hdmi_position_count\": %d,\n"
+        "%s"
         "  \"color_r\": %d,\n"
         "  \"color_g\": %d,\n"
         "  \"color_b\": %d,\n"
@@ -275,8 +309,8 @@ char* config_to_json(const ltc_config_t *config) {
         config->display_width,
         config->display_height,
         config->refresh_hz,
-        config->timecode_x_offset,
-        config->timecode_y_offset,
+        config->hdmi_position_count,
+        hdmi_pos_json,
         config->color_r,
         config->color_g,
         config->color_b,

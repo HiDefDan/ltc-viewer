@@ -480,7 +480,7 @@ static inline void timecode_fade_alphas(uint64_t elapsed_ns, uint64_t duration_n
  * scaled/positioned layouts from the same logical content. */
 static void build_output_render_state(gbm_render_state_t *out_state,
                                       uint32_t fb_width, uint32_t fb_height,
-                                      const ltc_config_t *cfg,
+                                      int x_offset, int y_offset,
                                       const char *timecode_str,
                                       uint32_t target_text_color,
                                       uint32_t bg_color,
@@ -516,7 +516,7 @@ static void build_output_render_state(gbm_render_state_t *out_state,
     uint32_t scaled_glyph_height = (uint32_t)(FONT_GLYPH_HEIGHT * glyph_scale + 0.5f);
     int32_t center_y = (render_height > scaled_glyph_height) ?
                        (int32_t)((render_height - scaled_glyph_height) / 2) : 0;
-    int32_t text_y_final = center_y + cfg->timecode_y_offset;
+    int32_t text_y_final = center_y + y_offset;
     int32_t min_text_y = 0;
     int32_t max_text_y = (int32_t)render_height - (int32_t)scaled_glyph_height;
     if (max_text_y < 0) {
@@ -536,29 +536,38 @@ static void build_output_render_state(gbm_render_state_t *out_state,
         scaled_digit_width = 1;
     }
 
+    /* The 2nd '.' in HH.MM.SS.FF is the natural reading center of the
+     * readout. Periods have zero advance width (drawn overlaid on the
+     * preceding digit, see gbm_backend_draw_text), so the 2nd period is
+     * drawn 3 digit-widths in from the string start — but it marks the
+     * *boundary* between MM and SS, i.e. the true midpoint of the 8-digit
+     * block, which is 4 digit-widths in (half of 8). Anchoring on the
+     * glyph's literal draw position (3 digits) instead of that boundary (4
+     * digits) shifts the whole string a full digit-width right of center;
+     * this anchors on the boundary, which is exactly plain bounding-box
+     * centering of the 8-digit string. */
     int32_t center_x = (render_width > scaled_string_width) ?
                        (int32_t)((render_width - scaled_string_width) / 2) : 0;
-    int32_t text_x_final = center_x + cfg->timecode_x_offset;
-    int32_t min_text_x = (int32_t)scaled_digit_width;
-    int32_t max_text_x = (int32_t)render_width - (int32_t)(9 * scaled_digit_width);
+    int32_t text_x_final = center_x + x_offset;
+
+    int32_t min_text_x = 0;
+    int32_t max_text_x = (int32_t)render_width - (int32_t)scaled_string_width;
+    if (max_text_x < 0) {
+        max_text_x = 0;
+    }
     if (text_x_final < min_text_x) {
         text_x_final = min_text_x;
     }
     if (text_x_final > max_text_x) {
         text_x_final = max_text_x;
     }
-    if (text_x_final < 0) {
-        text_x_final = 0;
-    }
-    if ((uint32_t)text_x_final + scaled_string_width > render_width) {
-        text_x_final = (int32_t)(render_width - scaled_string_width);
-        if (text_x_final < 0) {
-            text_x_final = 0;
-        }
-    }
 
-    uint32_t bg_x = ((uint32_t)text_x_final > scaled_digit_width) ?
-        ((uint32_t)text_x_final - scaled_digit_width) : 0;
+    /* Background "88.88.88.88." shares the same 8 digit-slots as the lit
+     * text — its only difference is a purely decorative trailing 4th
+     * period (a real 7-segment display's unlit extra decimal point), which
+     * has zero width and doesn't affect layout — so it starts at the same
+     * x as the text rather than offset by a digit. */
+    uint32_t bg_x = (uint32_t)text_x_final;
 
     float overlay_scale = glyph_scale * 0.23f;
     if (overlay_scale < 0.08f) {
@@ -918,10 +927,9 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 current_config = new_config;
-                  printf("[MAIN] Config reloaded: TZ=%s, NTP=%s, Mode=%dx%d@%.2f, Pos=(+%d,+%d), Color=(%d,%d,%d)\n",
+                  printf("[MAIN] Config reloaded: TZ=%s, NTP=%s, Mode=%dx%d@%.2f, Color=(%d,%d,%d)\n",
                       current_config.timezone, current_config.ntp_server,
                       current_config.display_width, current_config.display_height, current_config.refresh_hz,
-                       current_config.timecode_x_offset, current_config.timecode_y_offset,
                        current_config.color_r, current_config.color_g, current_config.color_b);
                 fflush(stdout);
             }
@@ -1211,7 +1219,7 @@ int main(int argc, char *argv[]) {
             /* Calculate vertical center and apply offset */
             int32_t center_y = (render_height > scaled_glyph_height) ?
                                (int32_t)((render_height - scaled_glyph_height) / 2) : 0;
-            int32_t text_y_final = center_y + current_config.timecode_y_offset;
+            int32_t text_y_final = center_y + 0; /* legacy software-raster path: DSI is locked to center */
             /* Clamp to valid range */
             int32_t min_text_y = 0;
             int32_t max_text_y = (int32_t)render_height - (int32_t)scaled_glyph_height;
@@ -1239,7 +1247,7 @@ int main(int argc, char *argv[]) {
             /* Center timecode, then clamp so full background stays on screen */
             int32_t center_x = (render_width > scaled_string_width) ?
                                (int32_t)((render_width - scaled_string_width) / 2) : 0;
-            int32_t text_x_final = center_x + current_config.timecode_x_offset;
+            int32_t text_x_final = center_x + 0; /* legacy software-raster path: DSI is locked to center */
 
             int32_t min_text_x = (int32_t)scaled_digit_width;
             int32_t max_text_x = (int32_t)render_width - (int32_t)(9 * scaled_digit_width);
@@ -1316,8 +1324,23 @@ int main(int argc, char *argv[]) {
                     uint32_t out_fb_width = display_backend_output_width(&g_backend, out_idx);
                     uint32_t out_fb_height = display_backend_output_height(&g_backend, out_idx);
 
+                    /* DSI (always output 0) is permanently locked to center.
+                     * Every HDMI output gets its own saved offset, keyed by
+                     * its stable port name (e.g. "HDMI-A-1"), so different
+                     * ports can be positioned independently. */
+                    int out_x_offset = 0;
+                    int out_y_offset = 0;
+                    if (out_idx != 0) {
+                        char port_name[32];
+                        drm_connector_name(display_backend_output_connector_type(&g_backend, out_idx),
+                                            display_backend_output_connector_type_id(&g_backend, out_idx),
+                                            port_name, sizeof(port_name));
+                        config_get_hdmi_offset(&current_config, port_name, &out_x_offset, &out_y_offset);
+                    }
+
                     gbm_render_state_t gbm_state;
-                    build_output_render_state(&gbm_state, out_fb_width, out_fb_height, &current_config,
+                    build_output_render_state(&gbm_state, out_fb_width, out_fb_height,
+                                               out_x_offset, out_y_offset,
                                                timecode_str, target_text_color, bg_color,
                                                source_fade_active,
                                                fade_from_str, from_color,

@@ -14,13 +14,15 @@ Low-latency LTC timecode display appliance for Raspberry Pi CM5 using DRM/KMS fr
 
 ## Display Behavior
 
-- DSI output is fixed at 60 Hz and is always the primary/permanent display.
-- The renderer now drives DSI **and** any connected HDMI output simultaneously — HDMI is no longer a DSI-absent fallback only. HDMI is detected live: plugging in a cable activates it within about a second (no service restart needed), and unplugging cleanly tears it back down without affecting the DSI panel.
+- DSI output is fixed at 60 Hz, is always the primary/permanent display, and is **permanently locked to center** — there is no user-adjustable position for it.
+- The renderer drives DSI **and** any connected HDMI output simultaneously. On Pi5/CM5-class hardware, DSI (RP1's `drm-rp1-dsi`) and HDMI (the main SoC's `vc4-drm`) are separate DRM devices with no shared GPU context — the backend tracks one GBM device per physical `/dev/dri/cardN` in use and gives each output its own font atlas/shader. HDMI is detected live: plugging in a cable activates it within about a second (no service restart needed), and unplugging cleanly tears it back down without affecting the DSI panel.
 - Each output renders the same LTC/ToD content natively in its own connector's preferred mode and orientation — the DSI panel keeps its portrait per-glyph UV rotation, while HDMI lays the timecode out full-size in its own landscape resolution (not a letterboxed copy of the DSI canvas). HDMI always uses its EDID-preferred mode; the configured `display_width`/`display_height`/`refresh_hz` apply to DSI only.
+- "Centered" is the bounding-box center of the 8-digit `HH.MM.SS.FF` string (the 2nd `.` between MM and SS marks that same midpoint — periods have zero glyph width, so the period itself is drawn one digit-width right of the true center). The background "88.88.88.88." now starts at the same x as the lit text (previously offset one digit-width left, which looked misaligned); its only decorative extra is a trailing 4th period, matching a real 7-segment display's unlit last decimal point.
+- Each connected HDMI display can be repositioned independently via the web UI, keyed by its stable port name (e.g. `HDMI-A-1` vs `HDMI-A-2`) so a saved offset survives unplug/replug and reboot. The Display Settings page shows one position control per currently-attached HDMI port and updates live (over the existing config WebSocket) as displays are connected/disconnected — no page reload needed.
 - Portrait DSI panels use per-glyph UV rotation in the GBM/EGL backend so text renders upright instead of stacked.
 - GBM/EGL LTC/ToD fades preserve zero-alpha endpoints correctly, eliminating the two full-brightness flashes that could appear at transition start/end.
 - LTC decode and update cadence is independent from panel scanout timing.
-- Diagnostic tip: verify the active DRM outputs with `sudo lsof -c ltc-timecode | grep /dev/dri` and compare against `/sys/class/drm/card0-DSI-1/status` and `/sys/class/drm/card2-HDMI-A-*/status` to confirm which connectors the renderer is using; `[GBM] Output N activated/deactivated` lines in the journal log hotplug transitions.
+- Diagnostic tip: verify the active DRM outputs with `sudo lsof -c ltc-timecode | grep /dev/dri` and compare against `/sys/class/drm/card1-DSI-1/status` and `/sys/class/drm/card2-HDMI-A-*/status` (card numbers vary by board) to confirm which connectors the renderer is using; `[GBM] Output N activated/deactivated` lines in the journal log hotplug transitions.
 
 ## Hardware Baseline
 

@@ -138,25 +138,13 @@
                 </div>
 
                 <div class="form-group">
-                    <label for="timecodeYOffset">Vertical Offset (pixels)</label>
-                    <div class="offset-control">
-                        <div class="offset-input-row">
-                            <input type="number" id="timecodeYOffset" name="timecodeYOffset" min="-500" max="500" value="0" required>
-                            <input type="range" id="timecodeYOffsetSlider" name="timecodeYOffsetSlider" min="-500" max="500" value="0" class="offset-slider">
-                        </div>
-                    </div>
-                    <small>Positive = lower, Negative = higher (within display bounds)</small>
+                    <small>The DSI panel is permanently locked to center and is not adjustable.</small>
                 </div>
 
                 <div class="form-group">
-                    <label for="timecodeXOffset">Horizontal Offset (pixels)</label>
-                    <div class="offset-control">
-                        <div class="offset-input-row">
-                            <input type="number" id="timecodeXOffset" name="timecodeXOffset" min="-500" max="500" value="0" required>
-                            <input type="range" id="timecodeXOffsetSlider" name="timecodeXOffsetSlider" min="-500" max="500" value="0" class="offset-slider">
-                        </div>
-                    </div>
-                    <small>Positive = right, Negative = left (within display bounds)</small>
+                    <label>HDMI Position</label>
+                    <small>Each connected HDMI display can be repositioned independently. Sections below appear automatically as displays are plugged in.</small>
+                    <div id="hdmiPositionsContainer" class="hdmi-positions-container"></div>
                 </div>
 
                 <div class="form-group">

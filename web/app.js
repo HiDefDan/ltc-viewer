@@ -13,6 +13,8 @@ class ConfigManager {
         this.livePositionUpdateTimer = null;
         this.livePositionUpdateInFlight = false;
         this.livePositionUpdateQueued = false;
+        this.hdmiPorts = [];
+        this.hdmiPositions = {};
         this.init();
     }
 
@@ -41,35 +43,31 @@ class ConfigManager {
         return Math.max(1, Math.round(BASE_TIME_STRING_HEIGHT * scale));
     }
 
-    getMaxYOffsetForResolution(width, height) {
-        const stringHeight = this.getScaledStringHeight(width, height);
-        return Math.max(0, (height - stringHeight) / 2);
-    }
-
-    clampTimecodeYOffset(value, width, height) {
-        if (Number.isNaN(value)) return 0;
-        const maxOffset = this.getMaxYOffsetForResolution(width, height);
-        return Math.min(maxOffset, Math.max(-maxOffset, value));
-    }
-
-    getMaxXOffsetForResolution(width, height) {
+    /* HDMI-only now (DSI is permanently locked to center). Bounding-box
+     * center of the 8-digit HH.MM.SS.FF string, matching the renderer's
+     * build_output_render_state() in src/main.c. Only the lit 8-digit text
+     * must stay fully on screen; these bounds are an approximation for
+     * slider UX, the renderer clamps authoritatively. */
+    getPortOffsetBounds(width, height) {
         const scale = this.getGlyphScale(width, height);
-        const scaledDigitWidth = Math.max(1, Math.round(209 * scale));
-        const scaledTimecodeWidth = 6 * scaledDigitWidth;
-        const centerX = (width > scaledTimecodeWidth) ? Math.floor((width - scaledTimecodeWidth) / 2) : 0;
+        const scaledStringWidth = Math.max(1, Math.round(8 * 209 * scale));
+        const scaledGlyphHeight = this.getScaledStringHeight(width, height);
 
-        const minTextX = scaledDigitWidth;
-        const maxTextX = width - (7 * scaledDigitWidth);
+        const centerX = (width > scaledStringWidth) ? Math.floor((width - scaledStringWidth) / 2) : 0;
+        const maxTextX = Math.max(0, width - scaledStringWidth);
+        const maxYOffset = Math.max(0, Math.floor((height - scaledGlyphHeight) / 2));
 
-        const maxLeft = centerX - minTextX;
-        const maxRight = maxTextX - centerX;
-        return Math.max(0, Math.floor(Math.min(maxLeft, maxRight)));
+        return {
+            xMin: -centerX,
+            xMax: maxTextX - centerX,
+            yMin: -maxYOffset,
+            yMax: maxYOffset
+        };
     }
 
-    clampTimecodeXOffset(value, width, height) {
+    clampValue(value, min, max) {
         if (Number.isNaN(value)) return 0;
-        const maxOffset = this.getMaxXOffsetForResolution(width, height);
-        return Math.min(maxOffset, Math.max(-maxOffset, value));
+        return Math.min(max, Math.max(min, value));
     }
 
     parseResolutionValue(value) {
@@ -80,62 +78,103 @@ class ConfigManager {
         return { width: parseInt(match[1]), height: parseInt(match[2]) };
     }
 
-    updateTimecodeYBounds(width, height) {
-        const yInput = document.getElementById('timecodeYOffset');
-        const ySlider = document.getElementById('timecodeYOffsetSlider');
-        const maxOffset = this.getMaxYOffsetForResolution(width, height);
-        const maxValue = String(Math.floor(maxOffset));
-        const minValue = String(-Math.floor(maxOffset));
-        const clamped = this.clampTimecodeYOffset(parseInt(yInput.value), width, height);
-
-        yInput.max = maxValue;
-        yInput.min = minValue;
-        yInput.value = clamped;
-
-        if (ySlider) {
-            ySlider.max = maxValue;
-            ySlider.min = minValue;
-            ySlider.value = clamped;
+    populateHdmiPositionsFromConfig() {
+        this.hdmiPositions = {};
+        const count = this.config.hdmi_position_count || 0;
+        for (let i = 0; i < count; i++) {
+            const name = this.config['hdmi_pos' + i + '_name'];
+            if (!name) continue;
+            this.hdmiPositions[name] = {
+                x_offset: this.config['hdmi_pos' + i + '_x_offset'] || 0,
+                y_offset: this.config['hdmi_pos' + i + '_y_offset'] || 0
+            };
         }
     }
 
-    updateTimecodeXBounds(width, height) {
-        const xInput = document.getElementById('timecodeXOffset');
-        const xSlider = document.getElementById('timecodeXOffsetSlider');
-        const maxOffset = this.getMaxXOffsetForResolution(width, height);
-        const maxValue = String(Math.floor(maxOffset));
-        const minValue = String(-Math.floor(maxOffset));
-        const clamped = this.clampTimecodeXOffset(parseInt(xInput.value), width, height);
-
-        xInput.max = maxValue;
-        xInput.min = minValue;
-        xInput.value = clamped;
-
-        if (xSlider) {
-            xSlider.max = maxValue;
-            xSlider.min = minValue;
-            xSlider.value = clamped;
+    async loadHdmiPorts() {
+        try {
+            const response = await fetch('/api/hdmi-ports');
+            const data = await response.json();
+            this.renderHdmiPositions(data.ports || []);
+        } catch (e) {
+            console.error('Failed to load HDMI ports:', e);
         }
+    }
+
+    renderHdmiPositions(ports) {
+        this.hdmiPorts = ports || [];
+        const container = document.getElementById('hdmiPositionsContainer');
+        if (!container) {
+            return;
+        }
+
+        if (this.hdmiPorts.length === 0) {
+            container.innerHTML = '<p class="empty-note">No HDMI display currently connected.</p>';
+            return;
+        }
+
+        container.innerHTML = '';
+        this.hdmiPorts.forEach(port => {
+            const saved = this.hdmiPositions[port.name] || { x_offset: 0, y_offset: 0 };
+            const bounds = this.getPortOffsetBounds(port.width, port.height);
+            const clampedX = this.clampValue(saved.x_offset, bounds.xMin, bounds.xMax);
+            const clampedY = this.clampValue(saved.y_offset, bounds.yMin, bounds.yMax);
+            this.hdmiPositions[port.name] = { x_offset: clampedX, y_offset: clampedY };
+
+            const block = document.createElement('div');
+            block.className = 'hdmi-port-block';
+            block.innerHTML = `
+                <div class="hdmi-port-title">${port.name} (${port.width}&times;${port.height}@${port.refresh.toFixed(2)}Hz)</div>
+                <div class="form-group">
+                    <label>Vertical Offset (pixels)</label>
+                    <div class="offset-control">
+                        <div class="offset-input-row">
+                            <input type="number" class="hdmi-pos-y" min="${bounds.yMin}" max="${bounds.yMax}" value="${clampedY}">
+                            <input type="range" class="hdmi-pos-y-slider offset-slider" min="${bounds.yMin}" max="${bounds.yMax}" value="${clampedY}">
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Horizontal Offset (pixels)</label>
+                    <div class="offset-control">
+                        <div class="offset-input-row">
+                            <input type="number" class="hdmi-pos-x" min="${bounds.xMin}" max="${bounds.xMax}" value="${clampedX}">
+                            <input type="range" class="hdmi-pos-x-slider offset-slider" min="${bounds.xMin}" max="${bounds.xMax}" value="${clampedX}">
+                        </div>
+                    </div>
+                </div>
+            `;
+            container.appendChild(block);
+
+            const yInput = block.querySelector('.hdmi-pos-y');
+            const ySlider = block.querySelector('.hdmi-pos-y-slider');
+            const xInput = block.querySelector('.hdmi-pos-x');
+            const xSlider = block.querySelector('.hdmi-pos-x-slider');
+
+            const onYChange = (rawValue) => {
+                const clamped = this.clampValue(parseInt(rawValue), bounds.yMin, bounds.yMax);
+                yInput.value = clamped;
+                ySlider.value = clamped;
+                this.hdmiPositions[port.name].y_offset = clamped;
+                this.queueLivePositionUpdate();
+            };
+            const onXChange = (rawValue) => {
+                const clamped = this.clampValue(parseInt(rawValue), bounds.xMin, bounds.xMax);
+                xInput.value = clamped;
+                xSlider.value = clamped;
+                this.hdmiPositions[port.name].x_offset = clamped;
+                this.queueLivePositionUpdate();
+            };
+
+            yInput.addEventListener('input', (e) => onYChange(e.target.value));
+            ySlider.addEventListener('input', (e) => onYChange(e.target.value));
+            xInput.addEventListener('input', (e) => onXChange(e.target.value));
+            xSlider.addEventListener('input', (e) => onXChange(e.target.value));
+        });
     }
 
     getSelectedResolution() {
         return this.parseResolutionValue(document.getElementById('displayResolution').value);
-    }
-
-    syncOffsetInputs(axis, rawValue) {
-        const selectedResolution = this.getSelectedResolution();
-        const isY = axis === 'y';
-        const clamped = isY
-            ? this.clampTimecodeYOffset(parseInt(rawValue), selectedResolution.width, selectedResolution.height)
-            : this.clampTimecodeXOffset(parseInt(rawValue), selectedResolution.width, selectedResolution.height);
-
-        if (isY) {
-            document.getElementById('timecodeYOffset').value = clamped;
-            document.getElementById('timecodeYOffsetSlider').value = clamped;
-        } else {
-            document.getElementById('timecodeXOffset').value = clamped;
-            document.getElementById('timecodeXOffsetSlider').value = clamped;
-        }
     }
 
     queueLivePositionUpdate() {
@@ -177,8 +216,6 @@ class ConfigManager {
                 if (responseData.config_revision) {
                     this.configRevision = responseData.config_revision;
                 }
-                this.config.timecode_x_offset = config.timecode_x_offset;
-                this.config.timecode_y_offset = config.timecode_y_offset;
             } else if (response.status === 409) {
                 this.isRemoteConfigSyncing = true;
                 this.setSaveLock(true, 'Syncing...');
@@ -202,6 +239,7 @@ class ConfigManager {
         await this.loadConfig();
         await this.loadNtpServers();
         await this.loadDisplayModes();
+        await this.loadHdmiPorts();
         this.startNtpStatusRefresh();
     }
 
@@ -219,32 +257,6 @@ class ConfigManager {
         document.getElementById('displayResolution').addEventListener('change', (e) => {
             const selected = this.parseResolutionValue(e.target.value);
             this.populateRefreshRateSelect(selected.width, selected.height);
-            this.updateTimecodeYBounds(selected.width, selected.height);
-            this.updateTimecodeXBounds(selected.width, selected.height);
-            this.queueLivePositionUpdate();
-        });
-
-        const yInput = document.getElementById('timecodeYOffset');
-        const xInput = document.getElementById('timecodeXOffset');
-        const ySlider = document.getElementById('timecodeYOffsetSlider');
-        const xSlider = document.getElementById('timecodeXOffsetSlider');
-
-        yInput.addEventListener('input', (e) => {
-            this.syncOffsetInputs('y', e.target.value);
-            this.queueLivePositionUpdate();
-        });
-        ySlider.addEventListener('input', (e) => {
-            this.syncOffsetInputs('y', e.target.value);
-            this.queueLivePositionUpdate();
-        });
-
-        xInput.addEventListener('input', (e) => {
-            this.syncOffsetInputs('x', e.target.value);
-            this.queueLivePositionUpdate();
-        });
-        xSlider.addEventListener('input', (e) => {
-            this.syncOffsetInputs('x', e.target.value);
-            this.queueLivePositionUpdate();
         });
 
         // Color sliders
@@ -380,7 +392,6 @@ class ConfigManager {
         resolutionSelect.value = targetResolution;
         const selected = this.parseResolutionValue(targetResolution);
         this.populateRefreshRateSelect(selected.width, selected.height);
-        this.updateTimecodeYBounds(selected.width, selected.height);
     }
 
     populateRefreshRateSelect(width, height) {
@@ -627,28 +638,11 @@ class ConfigManager {
             document.getElementById('displayResolution').value = resolutionValue;
             const selectedResolution = this.parseResolutionValue(document.getElementById('displayResolution').value);
             this.populateRefreshRateSelect(selectedResolution.width, selectedResolution.height);
-            this.updateTimecodeYBounds(selectedResolution.width, selectedResolution.height);
-            this.updateTimecodeXBounds(selectedResolution.width, selectedResolution.height);
-        } else {
-            this.updateTimecodeYBounds(configWidth, configHeight);
-            this.updateTimecodeXBounds(configWidth, configHeight);
         }
 
-        const yInput = document.getElementById('timecodeYOffset');
-        const clampedY = this.clampTimecodeYOffset(this.config.timecode_y_offset || 0, configWidth, configHeight);
-        yInput.value = clampedY;
-        const ySlider = document.getElementById('timecodeYOffsetSlider');
-        if (ySlider) {
-            ySlider.value = clampedY;
-        }
+        this.populateHdmiPositionsFromConfig();
+        this.renderHdmiPositions(this.hdmiPorts);
 
-        const xInput = document.getElementById('timecodeXOffset');
-        const clampedX = this.clampTimecodeXOffset(this.config.timecode_x_offset || 0, configWidth, configHeight);
-        xInput.value = clampedX;
-        const xSlider = document.getElementById('timecodeXOffsetSlider');
-        if (xSlider) {
-            xSlider.value = clampedX;
-        }
         document.getElementById('transitionFadeMs').value = this.config.transition_fade_ms ?? 120;
 
         document.getElementById('colorR').value = this.config.color_r || 64;
@@ -759,6 +753,10 @@ class ConfigManager {
                             this.showStatusWithAutoHide('Configuration updated in another browser, refreshing...', 'warning', 3500);
                             this.loadConfig();
                         }
+                        return;
+                    }
+                    if (data.type === 'hdmi_ports') {
+                        this.renderHdmiPositions(data.ports || []);
                         return;
                     }
                     if (data.interfaces) {
@@ -903,16 +901,6 @@ class ConfigManager {
 
         this.setSaveLock(true, 'Saving...');
 
-        const selectedResolution = this.getSelectedResolution();
-        const yInput = document.getElementById('timecodeYOffset');
-        const xInput = document.getElementById('timecodeXOffset');
-        const clampedY = this.clampTimecodeYOffset(parseInt(yInput.value), selectedResolution.width, selectedResolution.height);
-        const clampedX = this.clampTimecodeXOffset(parseInt(xInput.value), selectedResolution.width, selectedResolution.height);
-        yInput.value = clampedY;
-        xInput.value = clampedX;
-        document.getElementById('timecodeYOffsetSlider').value = clampedY;
-        document.getElementById('timecodeXOffsetSlider').value = clampedX;
-
         const config = this.buildConfigPayload(true);
 
         this.showStatus('Saving configuration...', 'loading');
@@ -976,12 +964,8 @@ class ConfigManager {
             document.getElementById('displayResolution').value = `${BASE_DISPLAY_WIDTH}x${BASE_DISPLAY_HEIGHT}`;
             this.populateRefreshRateSelect(BASE_DISPLAY_WIDTH, BASE_DISPLAY_HEIGHT);
             document.getElementById('refreshHz').value = '60.00';
-            this.updateTimecodeYBounds(BASE_DISPLAY_WIDTH, BASE_DISPLAY_HEIGHT);
-            this.updateTimecodeXBounds(BASE_DISPLAY_WIDTH, BASE_DISPLAY_HEIGHT);
-            document.getElementById('timecodeYOffset').value = 0;
-            document.getElementById('timecodeXOffset').value = 0;
-            document.getElementById('timecodeYOffsetSlider').value = 0;
-            document.getElementById('timecodeXOffsetSlider').value = 0;
+            this.hdmiPositions = {};
+            this.renderHdmiPositions(this.hdmiPorts);
             document.getElementById('transitionFadeMs').value = 120;
 
             document.getElementById('colorR').value = 64;
@@ -1005,24 +989,8 @@ class ConfigManager {
 
     buildConfigPayload(withRevision) {
         const selectedResolution = this.getSelectedResolution();
-        const yInput = document.getElementById('timecodeYOffset');
-        const xInput = document.getElementById('timecodeXOffset');
         const timezoneValue = document.getElementById('timezone').value || this.config.timezone || 'Europe/London';
         const ntpValue = document.getElementById('ntpServer').value || this.config.ntp_server || 'pool.ntp.org';
-        const clampedY = this.clampTimecodeYOffset(parseInt(yInput.value), selectedResolution.width, selectedResolution.height);
-        const clampedX = this.clampTimecodeXOffset(parseInt(xInput.value), selectedResolution.width, selectedResolution.height);
-
-        yInput.value = clampedY;
-        xInput.value = clampedX;
-
-        const ySlider = document.getElementById('timecodeYOffsetSlider');
-        const xSlider = document.getElementById('timecodeXOffsetSlider');
-        if (ySlider) {
-            ySlider.value = clampedY;
-        }
-        if (xSlider) {
-            xSlider.value = clampedX;
-        }
 
         const config = {
             timezone: timezoneValue,
@@ -1030,8 +998,6 @@ class ConfigManager {
             display_width: selectedResolution.width,
             display_height: selectedResolution.height,
             refresh_hz: parseFloat(document.getElementById('refreshHz').value),
-            timecode_x_offset: clampedX,
-            timecode_y_offset: clampedY,
             transition_fade_ms: parseInt(document.getElementById('transitionFadeMs').value) || 0,
             color_r: parseInt(document.getElementById('colorR').value),
             color_g: parseInt(document.getElementById('colorG').value),
@@ -1043,6 +1009,14 @@ class ConfigManager {
             web_ui_bind_address: document.getElementById('webUiBindAddress').value || '0.0.0.0',
             web_ui_bind_port: parseInt(document.getElementById('webUiBindPort').value) || 8080
         };
+
+        const hdmiPortNames = Object.keys(this.hdmiPositions).slice(0, 4);
+        config.hdmi_position_count = hdmiPortNames.length;
+        hdmiPortNames.forEach((name, i) => {
+            config['hdmi_pos' + i + '_name'] = name;
+            config['hdmi_pos' + i + '_x_offset'] = this.hdmiPositions[name].x_offset;
+            config['hdmi_pos' + i + '_y_offset'] = this.hdmiPositions[name].y_offset;
+        });
 
         if (withRevision) {
             config.config_revision = this.configRevision;
