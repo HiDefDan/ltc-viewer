@@ -1788,6 +1788,27 @@ int main(int argc, char *argv[]) {
 
     printf("[MAIN] Shutting down...\n");
 
+    /* Blank every active output before tearing down. DRM keeps scanning out
+     * whatever framebuffer was last flipped even after this process exits,
+     * so on a graceful shutdown (SIGTERM/SIGINT — systemd gives us
+     * TimeoutStopSec to do this) the panel would otherwise be left frozen
+     * on the last rendered timecode instead of going blank. */
+    if (g_backend.type == DISPLAY_BACKEND_GBM) {
+        gbm_render_state_t blank_state;
+        memset(&blank_state, 0, sizeof(blank_state));
+        blank_state.timecode_str = "";
+        blank_state.bg_color = 0x000000;
+
+        int blank_slots = display_backend_output_count(&g_backend);
+        for (int i = 0; i < blank_slots; i++) {
+            if (!display_backend_output_active(&g_backend, i)) {
+                continue;
+            }
+            display_backend_render_output(&g_backend, i, &blank_state);
+            display_backend_flip_output(&g_backend, i);
+        }
+    }
+
     /* Cleanup */
     if (rtactx.rta) {
         if (rtaudio_is_stream_running(rtactx.rta))
