@@ -159,8 +159,14 @@ static int ltc_rtaudio_callback(void *out, void *in, unsigned int nframes,
     ltc_feed_audio(ctx->decoder, pcm, nframes, 1);
     uint64_t callback_end_sample = ctx->decoder->sample_pos;
 
+    /* Hard cap on the drain loop: the libltc queue holds at most 32 frames,
+     * so anything past that means a state bug is feeding us frames forever —
+     * and an unbounded loop here runs at RT priority on the isolated core,
+     * where it starves the whole system (observed 2026-08-01: RR-80 spin →
+     * watchdog reboot). Bail out and let the next callback continue. */
+    int drain_budget = 64;
     ltc_frame_t decoded;
-    while (ltc_get_frame(ctx->decoder, &decoded) == 0) {
+    while (drain_budget-- > 0 && ltc_get_frame(ctx->decoder, &decoded) == 0) {
         struct timespec ts_now;
         clock_gettime(CLOCK_MONOTONIC, &ts_now);
         uint64_t mono_ns = (uint64_t)ts_now.tv_sec * 1000000000ULL + (uint64_t)ts_now.tv_nsec;
@@ -446,6 +452,12 @@ static ltc_frame_t tc_add_steps(const ltc_frame_t *f, uint32_t fps, uint32_t ste
 
 void signal_handler(int sig) {
     (void)sig;
+    /* Second signal = the graceful path is stuck (or starved by a runaway
+     * RT thread) — bail out hard so the process is always killable from
+     * the keyboard. DRM keeps scanning out the last frame regardless. */
+    if (should_exit) {
+        _exit(130);
+    }
     should_exit = 1;
 }
 
@@ -617,8 +629,19 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
+    /* LTC_NO_RT=1: diagnostic mode — run everything as normal CFS tasks on
+     * all cores (no FIFO/RR, no CPU pinning, no RT audio thread). A runaway
+     * loop then costs one core's worth of CFS time instead of starving the
+     * isolated RT core and tripping the hardware watchdog, and gdb can
+     * attach safely. Latency figures are meaningless in this mode. */
+    const char *no_rt_env = getenv("LTC_NO_RT");
+    int no_rt = (no_rt_env && no_rt_env[0] == '1');
+    if (no_rt) {
+        printf("[MAIN] LTC_NO_RT=1: RT scheduling and CPU pinning DISABLED (diagnostic mode)\n");
+    }
+
     /* Pin main thread to isolated core 3 when available. */
-    {
+    if (!no_rt) {
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(3, &cpuset);
@@ -633,7 +656,9 @@ int main(int argc, char *argv[]) {
     /* Enable real-time scheduling (SCHED_FIFO priority 50) */
     struct sched_param param = {0};
     param.sched_priority = 50;
-    if (sched_setscheduler(0, SCHED_FIFO, &param) != 0) {
+    if (no_rt) {
+        /* diagnostic mode: stay SCHED_OTHER */
+    } else if (sched_setscheduler(0, SCHED_FIFO, &param) != 0) {
         fprintf(stderr, "[MAIN] Warning: Failed to set real-time scheduling (requires CAP_SYS_NICE)\n");
         perror("[MAIN] sched_setscheduler");
     } else {
@@ -771,7 +796,10 @@ int main(int argc, char *argv[]) {
 
     rtaudio_stream_options_t rta_opts;
     memset(&rta_opts, 0, sizeof(rta_opts));
-    rta_opts.flags       = RTAUDIO_FLAGS_MINIMIZE_LATENCY | RTAUDIO_FLAGS_SCHEDULE_REALTIME;
+    rta_opts.flags       = RTAUDIO_FLAGS_MINIMIZE_LATENCY;
+    if (!no_rt) {
+        rta_opts.flags |= RTAUDIO_FLAGS_SCHEDULE_REALTIME;
+    }
     rta_opts.num_buffers = requested_rta_num_buffers;
     rta_opts.priority    = (int)rta_rt_priority;
     strncpy(rta_opts.name, "ltc-timecode", sizeof(rta_opts.name) - 1);
