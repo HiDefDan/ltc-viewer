@@ -5,6 +5,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <poll.h>
+#include <time.h>
 #include <math.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -618,6 +620,128 @@ static int create_drm_fb_for_bo(ltc_gbm_output_t *out, struct gbm_bo *bo, uint32
     return 0;
 }
 
+/* DRM framebuffer id cached on the gbm_bo itself (kmscube pattern): created
+ * on the buffer's first trip through the flip path, destroyed automatically
+ * with the BO when its gbm_surface is destroyed. The surface cycles through
+ * a fixed small set of BOs, so after the first few frames the flip path
+ * does no FB creation and no allocation at all. */
+typedef struct {
+    int drm_fd;
+    uint32_t fb_id;
+} gbm_fb_cache_t;
+
+static void gbm_fb_cache_destroy(struct gbm_bo *bo, void *data) {
+    (void)bo;
+    gbm_fb_cache_t *cache = data;
+    if (cache) {
+        drmModeRmFB(cache->drm_fd, cache->fb_id);
+        free(cache);
+    }
+}
+
+static uint32_t get_fb_for_bo(ltc_gbm_output_t *out, struct gbm_bo *bo) {
+    gbm_fb_cache_t *cache = gbm_bo_get_user_data(bo);
+    if (cache) {
+        return cache->fb_id;
+    }
+    uint32_t fb_id = 0;
+    if (create_drm_fb_for_bo(out, bo, &fb_id) != 0) {
+        return 0;
+    }
+    cache = malloc(sizeof(*cache));
+    if (!cache) {
+        drmModeRmFB(out->drm_fd, fb_id);
+        return 0;
+    }
+    cache->drm_fd = out->drm_fd;
+    cache->fb_id = fb_id;
+    gbm_bo_set_user_data(bo, cache, gbm_fb_cache_destroy);
+    return fb_id;
+}
+
+static void gbm_page_flip_handler(int fd, unsigned int sequence,
+                                  unsigned int tv_sec, unsigned int tv_usec,
+                                  void *user_data) {
+    (void)fd; (void)sequence; (void)tv_sec; (void)tv_usec;
+    ltc_gbm_output_t *out = user_data;
+    if (!out) return;
+    /* The queued buffer is now on scanout; the previously scanned-out
+     * buffer is free to be rendered into again. */
+    if (out->prev_bo && out->gbm_surf) {
+        gbm_surface_release_buffer(out->gbm_surf, out->prev_bo);
+    }
+    out->prev_bo = out->next_bo;
+    out->next_bo = NULL;
+    out->pending_flip = 0;
+}
+
+int gbm_backend_wait_flips(ltc_gbm_context_t *ctx, int timeout_ms) {
+    if (!ctx) return 0;
+
+    drmEventContext ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.version = 2;
+    ev.page_flip_handler = gbm_page_flip_handler;
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    deadline.tv_sec += timeout_ms / 1000 + deadline.tv_nsec / 1000000000L;
+    deadline.tv_nsec %= 1000000000L;
+
+    for (;;) {
+        /* Distinct device fds that still have a flip in flight. */
+        struct pollfd pfds[LTC_GBM_MAX_DEVICES];
+        int nfds = 0;
+        int pending = 0;
+        for (int i = 0; i < ctx->output_count; i++) {
+            ltc_gbm_output_t *out = &ctx->outputs[i];
+            if (!out->active || !out->pending_flip) continue;
+            pending++;
+            int seen = 0;
+            for (int j = 0; j < nfds; j++) {
+                if (pfds[j].fd == out->drm_fd) { seen = 1; break; }
+            }
+            if (!seen && nfds < LTC_GBM_MAX_DEVICES) {
+                pfds[nfds].fd = out->drm_fd;
+                pfds[nfds].events = POLLIN;
+                pfds[nfds].revents = 0;
+                nfds++;
+            }
+        }
+        if (pending == 0) {
+            return 0;
+        }
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long remain_ms = (long)(deadline.tv_sec - now.tv_sec) * 1000L
+                       + (deadline.tv_nsec - now.tv_nsec) / 1000000L;
+        if (remain_ms < 0) {
+            return pending;
+        }
+
+        int rc = poll(pfds, (nfds_t)nfds, (int)remain_ms);
+        if (rc < 0) {
+            if (errno == EINTR) continue;
+            return pending;
+        }
+        if (rc == 0) {
+            return pending; /* timed out with flips still in flight */
+        }
+        for (int j = 0; j < nfds; j++) {
+            if (pfds[j].revents & POLLIN) {
+                drmHandleEvent(pfds[j].fd, &ev);
+            }
+        }
+    }
+}
+
+int gbm_backend_output_flip_pending(const ltc_gbm_context_t *ctx, int idx) {
+    if (!ctx || idx < 0 || idx >= ctx->output_count) return 0;
+    return ctx->outputs[idx].active && ctx->outputs[idx].pending_flip;
+}
+
 /* Finds (or lazily creates) the ltc_gbm_device_t for a given drm fd. Devices
  * are never destroyed except in gbm_backend_cleanup, so once created a
  * device's gbm_dev/egl_display stay valid for the process lifetime even if
@@ -787,6 +911,10 @@ static int activate_output(ltc_gbm_context_t *ctx, int idx, int fd, uint32_t con
         return -1;
     }
 
+    /* Presentation timing is owned by drmModePageFlip; eglSwapBuffers must
+     * never add its own vsync throttle on top. */
+    eglSwapInterval(dev->egl_display, 0);
+
     if (sibling) {
         /* Same drm fd as an existing output: shares this context's object
          * namespace, so the sibling's program name is valid here too. */
@@ -839,8 +967,15 @@ void gbm_backend_deactivate_output(ltc_gbm_context_t *ctx, int idx) {
         if (ctx->devices[i].drm_fd == out->drm_fd) { dev_idx = i; break; }
     }
 
-    if (out->prev_fb) {
-        drmModeRmFB(out->drm_fd, out->prev_fb);
+    /* Let an in-flight flip land before tearing the surface down (its
+     * completion handler touches out->prev_bo/next_bo). On timeout we
+     * proceed anyway — destroying the surface releases the BOs and their
+     * cached FBs regardless. */
+    if (out->pending_flip) {
+        gbm_backend_wait_flips(ctx, 100);
+    }
+    if (out->next_bo && out->gbm_surf) {
+        gbm_surface_release_buffer(out->gbm_surf, out->next_bo);
     }
     if (out->prev_bo && out->gbm_surf) {
         gbm_surface_release_buffer(out->gbm_surf, out->prev_bo);
@@ -1059,10 +1194,9 @@ int gbm_backend_read_pixels(ltc_gbm_context_t *ctx, int idx, uint8_t *buf) {
     return 0;
 }
 
-int gbm_backend_flip_output(ltc_gbm_context_t *ctx, int idx) {
-    if (!ctx || idx < 0 || idx >= ctx->output_count || !ctx->outputs[idx].active) {
-        return -1;
-    }
+/* Common front half of both flip flavors: swap the EGL surface and lock
+ * the freshly rendered front buffer, returning it with its cached FB id. */
+static struct gbm_bo *lock_rendered_frame(ltc_gbm_context_t *ctx, int idx, uint32_t *fb_id) {
     ltc_gbm_output_t *out = &ctx->outputs[idx];
     EGLDisplay dpy = EGL_NO_DISPLAY;
     for (int i = 0; i < ctx->device_count; i++) {
@@ -1072,44 +1206,109 @@ int gbm_backend_flip_output(ltc_gbm_context_t *ctx, int idx) {
     if (!eglMakeCurrent(dpy, out->egl_surface, out->egl_surface, out->egl_context)) {
         fprintf(stderr, "[GBM] eglMakeCurrent failed for output %d flip, eglGetError=0x%x\n", idx, eglGetError());
         fflush(stderr);
-        return -1;
+        return NULL;
     }
 
     if (!eglSwapBuffers(dpy, out->egl_surface)) {
         fprintf(stderr, "[GBM] eglSwapBuffers failed for output %d, eglGetError=0x%x\n", idx, eglGetError()); fflush(stderr);
-        return -1;
+        return NULL;
     }
 
     struct gbm_bo *bo = gbm_surface_lock_front_buffer(out->gbm_surf);
     if (!bo) {
         fprintf(stderr, "[GBM] gbm_surface_lock_front_buffer failed for output %d\n", idx); fflush(stderr);
-        return -1;
+        return NULL;
     }
 
-    uint32_t fb_id = 0;
-    if (create_drm_fb_for_bo(out, bo, &fb_id) != 0) {
+    *fb_id = get_fb_for_bo(out, bo);
+    if (*fb_id == 0) {
         gbm_surface_release_buffer(out->gbm_surf, bo);
-        return -1;
+        return NULL;
     }
+    return bo;
+}
 
+/* Blocking present: full modeset onto the new buffer, returns with the
+ * frame on scanout. Also the first-frame path (the one legitimate modeset)
+ * and the fallback when the driver rejects async flips. */
+static int present_sync(ltc_gbm_output_t *out, struct gbm_bo *bo, uint32_t fb_id) {
     if (drmModeSetCrtc(out->drm_fd, out->crtc_id, fb_id, 0, 0, &out->connector_id, 1, &out->mode) != 0) {
-        fprintf(stderr, "[GBM] drmModeSetCrtc failed for output %d (crtc=%u connector=%u): %s\n",
-                idx, out->crtc_id, out->connector_id, strerror(errno)); fflush(stderr);
-        drmModeRmFB(out->drm_fd, fb_id);
+        fprintf(stderr, "[GBM] drmModeSetCrtc failed for output (crtc=%u connector=%u): %s\n",
+                out->crtc_id, out->connector_id, strerror(errno)); fflush(stderr);
         gbm_surface_release_buffer(out->gbm_surf, bo);
         return -1;
     }
-
-    if (out->prev_fb) {
-        drmModeRmFB(out->drm_fd, out->prev_fb);
-    }
+    out->mode_set = 1;
     if (out->prev_bo) {
         gbm_surface_release_buffer(out->gbm_surf, out->prev_bo);
     }
     out->prev_bo = bo;
-    out->prev_fb = fb_id;
-
     return 0;
+}
+
+int gbm_backend_flip_output(ltc_gbm_context_t *ctx, int idx) {
+    if (!ctx || idx < 0 || idx >= ctx->output_count || !ctx->outputs[idx].active) {
+        return -1;
+    }
+    ltc_gbm_output_t *out = &ctx->outputs[idx];
+    if (out->pending_flip) {
+        /* Caller must wait for the outstanding flip first. */
+        return -1;
+    }
+
+    uint32_t fb_id = 0;
+    struct gbm_bo *bo = lock_rendered_frame(ctx, idx, &fb_id);
+    if (!bo) {
+        return -1;
+    }
+
+    /* First frame after activation needs the one legitimate modeset to
+     * bind CRTC->connector; every later frame rides the vblank via an
+     * async page flip. */
+    if (!out->mode_set) {
+        return present_sync(out, bo, fb_id);
+    }
+
+    if (drmModePageFlip(out->drm_fd, out->crtc_id, fb_id,
+                        DRM_MODE_PAGE_FLIP_EVENT, out) == 0) {
+        out->next_bo = bo;
+        out->pending_flip = 1;
+        return 0;
+    }
+
+    if (errno == EBUSY) {
+        /* A flip is somehow still in flight (shouldn't happen given the
+         * pending_flip gate) — drop this frame rather than block. */
+        fprintf(stderr, "[GBM] drmModePageFlip EBUSY on output %d, dropping frame\n", idx); fflush(stderr);
+        gbm_surface_release_buffer(out->gbm_surf, bo);
+        return 0;
+    }
+
+    /* Driver refused the flip (e.g. EINVAL) — fall back to the blocking
+     * modeset so the display keeps working, and log once per output. */
+    static int logged_fallback[LTC_GBM_MAX_OUTPUTS] = {0};
+    if (idx >= 0 && idx < LTC_GBM_MAX_OUTPUTS && !logged_fallback[idx]) {
+        fprintf(stderr, "[GBM] drmModePageFlip failed on output %d (%s), using SetCrtc fallback\n",
+                idx, strerror(errno)); fflush(stderr);
+        logged_fallback[idx] = 1;
+    }
+    return present_sync(out, bo, fb_id);
+}
+
+int gbm_backend_flip_output_sync(ltc_gbm_context_t *ctx, int idx) {
+    if (!ctx || idx < 0 || idx >= ctx->output_count || !ctx->outputs[idx].active) {
+        return -1;
+    }
+    ltc_gbm_output_t *out = &ctx->outputs[idx];
+    if (out->pending_flip) {
+        gbm_backend_wait_flips(ctx, 100);
+    }
+    uint32_t fb_id = 0;
+    struct gbm_bo *bo = lock_rendered_frame(ctx, idx, &fb_id);
+    if (!bo) {
+        return -1;
+    }
+    return present_sync(out, bo, fb_id);
 }
 
 int gbm_backend_poll_hotplug(ltc_gbm_context_t *ctx) {

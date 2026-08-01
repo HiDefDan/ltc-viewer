@@ -54,7 +54,15 @@ uint32_t display_backend_output_connector_type_id(const display_backend_t *backe
 uint32_t display_backend_output_digit_width(const display_backend_t *backend, int idx);
 uint32_t display_backend_output_glyph_height(const display_backend_t *backend, int idx);
 int display_backend_render_output(display_backend_t *backend, int idx, const gbm_render_state_t *state);
+/* Queues an async page flip; completion arrives via
+ * display_backend_wait_flips(). Skip outputs whose
+ * display_backend_output_flip_pending() is still true. */
 int display_backend_flip_output(display_backend_t *backend, int idx);
+/* Blocking present (SetCrtc) — shutdown blanking only. */
+int display_backend_flip_output_sync(display_backend_t *backend, int idx);
+/* Blocks until queued flips land (or timeout). Returns flips still pending. */
+int display_backend_wait_flips(display_backend_t *backend, int timeout_ms);
+int display_backend_output_flip_pending(const display_backend_t *backend, int idx);
 
 /* Rescans connected HDMI outputs and activates/deactivates as needed.
  * Returns the number of outputs that changed state. Cheap to call every

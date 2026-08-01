@@ -215,6 +215,33 @@ int display_backend_flip_output(display_backend_t *backend, int idx)
     return idx == 0 ? drm_page_flip_sync(&backend->ctx.drm) : -1;
 }
 
+int display_backend_flip_output_sync(display_backend_t *backend, int idx)
+{
+    if (!backend) return -1;
+    if (backend->type == DISPLAY_BACKEND_GBM) {
+        return gbm_backend_flip_output_sync(&backend->ctx.gbm, idx);
+    }
+    return idx == 0 ? drm_page_flip_sync(&backend->ctx.drm) : -1;
+}
+
+int display_backend_wait_flips(display_backend_t *backend, int timeout_ms)
+{
+    if (!backend) return 0;
+    if (backend->type == DISPLAY_BACKEND_GBM) {
+        return gbm_backend_wait_flips(&backend->ctx.gbm, timeout_ms);
+    }
+    return 0;
+}
+
+int display_backend_output_flip_pending(const display_backend_t *backend, int idx)
+{
+    if (!backend) return 0;
+    if (backend->type == DISPLAY_BACKEND_GBM) {
+        return gbm_backend_output_flip_pending(&backend->ctx.gbm, idx);
+    }
+    return 0;
+}
+
 int display_backend_poll_hotplug(display_backend_t *backend)
 {
     if (!backend) return 0;

@@ -90,8 +90,10 @@ typedef struct {
     EGLContext egl_context;
     EGLSurface egl_surface;
     uint32_t drm_format;
-    struct gbm_bo *prev_bo;
-    uint32_t prev_fb;
+    struct gbm_bo *prev_bo;  /* buffer currently (or last) on scanout */
+    struct gbm_bo *next_bo;  /* buffer queued in an in-flight page flip */
+    int mode_set;            /* drmModeSetCrtc done once at activation */
+    int pending_flip;        /* a drmModePageFlip event is outstanding */
     uint32_t width, height;
     float refresh_hz;
     GLuint font_atlas_tex;
@@ -158,7 +160,23 @@ int gbm_backend_render_output(ltc_gbm_context_t *ctx, int idx, const gbm_render_
  * (width*height*4) with top-down ARGB8888 pixels of the pending frame. */
 int gbm_backend_read_pixels(ltc_gbm_context_t *ctx, int idx, uint8_t *buf);
 
+/* Queues an async page flip (drmModePageFlip) of the just-rendered frame.
+ * Completion is collected by gbm_backend_wait_flips(); never call again for
+ * the same output while gbm_backend_output_flip_pending() is true. Falls
+ * back to a blocking SetCrtc if the driver rejects the flip. */
 int gbm_backend_flip_output(ltc_gbm_context_t *ctx, int idx);
+
+/* Blocking SetCrtc presentation of the just-rendered frame (drains any
+ * in-flight flip first). Used for the final shutdown blank, where the frame
+ * must be on scanout before the process exits. */
+int gbm_backend_flip_output_sync(ltc_gbm_context_t *ctx, int idx);
+
+/* Waits (up to timeout_ms) for outstanding page flips to complete, i.e.
+ * for the vblank that latches each output's queued frame. Returns the
+ * number of flips still pending on return (0 = all landed). */
+int gbm_backend_wait_flips(ltc_gbm_context_t *ctx, int timeout_ms);
+
+int gbm_backend_output_flip_pending(const ltc_gbm_context_t *ctx, int idx);
 
 /* Rescan known HDMI connectors (across every DRM device found at startup)
  * for connect/disconnect transitions and activate/deactivate outputs

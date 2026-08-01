@@ -1324,6 +1324,13 @@ int main(int argc, char *argv[]) {
                     if (!display_backend_output_active(&g_backend, out_idx)) {
                         continue;
                     }
+                    if (display_backend_output_flip_pending(&g_backend, out_idx)) {
+                        /* Previous flip hasn't hit vblank yet (slow or
+                         * stalled output) — skip this frame for it rather
+                         * than block the others. */
+                        continue;
+                    }
+
                     uint32_t out_fb_width = display_backend_output_width(&g_backend, out_idx);
                     uint32_t out_fb_height = display_backend_output_height(&g_backend, out_idx);
 
@@ -1774,10 +1781,33 @@ int main(int argc, char *argv[]) {
                 target_period_ns = 10000000ULL;
             }
 
-            uint64_t sleep_ns;
             if (g_backend.type == DISPLAY_BACKEND_GBM) {
-                sleep_ns = target_period_ns;
-            } else if (ltc_live) {
+                /* Flip-completion-driven pacing: block until the queued
+                 * page flips land on their vblanks (bounded by ~2 frame
+                 * periods for a stalled output). Waking on the vblank means
+                 * the next iteration renders the freshest LTC frame with a
+                 * full refresh period of margin before the next latch. */
+                int timeout_ms = (int)((2ULL * target_period_ns) / 1000000ULL);
+                if (timeout_ms < 5) timeout_ms = 5;
+                int outputs_pending = 0;
+                for (int i = 0; i < display_backend_output_count(&g_backend); i++) {
+                    if (display_backend_output_flip_pending(&g_backend, i)) {
+                        outputs_pending++;
+                    }
+                }
+                if (outputs_pending > 0) {
+                    display_backend_wait_flips(&g_backend, timeout_ms);
+                } else {
+                    /* Nothing in flight (all outputs failed/idle): don't
+                     * busy-spin. */
+                    struct timespec ts_idle = { 0, 2000000L }; /* 2 ms */
+                    nanosleep(&ts_idle, NULL);
+                }
+                continue;
+            }
+
+            uint64_t sleep_ns;
+            if (ltc_live) {
                 sleep_ns = need_render
                     ? (target_period_ns / (uint64_t)ltc_live_need_render_div)
                     : (target_period_ns / (uint64_t)ltc_live_idle_div);
@@ -1836,7 +1866,10 @@ int main(int argc, char *argv[]) {
                 continue;
             }
             display_backend_render_output(&g_backend, i, &blank_state);
-            display_backend_flip_output(&g_backend, i);
+            /* Synchronous present: the blank frame must be on scanout
+             * before this process exits, not queued behind a vblank event
+             * nobody will be alive to collect. */
+            display_backend_flip_output_sync(&g_backend, i);
         }
     }
 
