@@ -154,6 +154,9 @@ uint32_t gbm_backend_output_connector_type_id(const ltc_gbm_context_t *ctx, int 
 uint32_t gbm_backend_output_digit_width(const ltc_gbm_context_t *ctx, int idx);
 uint32_t gbm_backend_output_glyph_height(const ltc_gbm_context_t *ctx, int idx);
 int gbm_backend_render_output(ltc_gbm_context_t *ctx, int idx, const gbm_render_state_t *state);
+/* Debug framegrab: call between render_output and flip_output. Fills buf
+ * (width*height*4) with top-down ARGB8888 pixels of the pending frame. */
+int gbm_backend_read_pixels(ltc_gbm_context_t *ctx, int idx, uint8_t *buf);
 
 int gbm_backend_flip_output(ltc_gbm_context_t *ctx, int idx);
 

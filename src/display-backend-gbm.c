@@ -1026,6 +1026,39 @@ int gbm_backend_render_output(ltc_gbm_context_t *ctx, int idx, const gbm_render_
     return gbm_render_to_output(out, state);
 }
 
+/* Debug-only framegrab support: reads back the just-rendered (not yet
+ * swapped) frame as ARGB8888 rows top-down into buf (width*height*4 bytes).
+ * Must be called after gbm_backend_render_output and before the flip. */
+int gbm_backend_read_pixels(ltc_gbm_context_t *ctx, int idx, uint8_t *buf) {
+    if (!ctx || !buf || idx < 0 || idx >= ctx->output_count || !ctx->outputs[idx].active) {
+        return -1;
+    }
+    ltc_gbm_output_t *out = &ctx->outputs[idx];
+    /* Context is already current from the render call in this iteration. */
+    glReadPixels(0, 0, (GLsizei)out->width, (GLsizei)out->height,
+                 GL_RGBA, GL_UNSIGNED_BYTE, buf);
+    if (glGetError() != GL_NO_ERROR) {
+        return -1;
+    }
+    /* GL rows are bottom-up RGBA; convert in place to top-down ARGB8888
+     * byte order (B,G,R,A) as dump_render_buffer_bmp expects. */
+    uint32_t row_bytes = out->width * 4u;
+    for (uint32_t y = 0; y < out->height / 2 + (out->height & 1u); y++) {
+        uint8_t *top = buf + (size_t)y * row_bytes;
+        uint8_t *bot = buf + (size_t)(out->height - 1 - y) * row_bytes;
+        for (uint32_t x = 0; x < row_bytes; x += 4) {
+            uint8_t tr = top[x], tg = top[x + 1], tb = top[x + 2], ta = top[x + 3];
+            if (top != bot) {
+                top[x] = bot[x + 2]; top[x + 1] = bot[x + 1]; top[x + 2] = bot[x]; top[x + 3] = bot[x + 3];
+                bot[x] = tb; bot[x + 1] = tg; bot[x + 2] = tr; bot[x + 3] = ta;
+            } else {
+                top[x] = tb; top[x + 2] = tr;
+            }
+        }
+    }
+    return 0;
+}
+
 int gbm_backend_flip_output(ltc_gbm_context_t *ctx, int idx) {
     if (!ctx || idx < 0 || idx >= ctx->output_count || !ctx->outputs[idx].active) {
         return -1;

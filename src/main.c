@@ -1353,7 +1353,33 @@ int main(int argc, char *argv[]) {
                                                current_config.debug_overlay_enabled,
                                                overlay_str, overlay_color, (int)df_flag);
 
-                    if (display_backend_render_output(&g_backend, out_idx, &gbm_state) != 0 ||
+                    int render_rc = display_backend_render_output(&g_backend, out_idx, &gbm_state);
+
+                    /* Debug framegrab hook (readback must happen after the
+                     * render, before the flip swaps the buffer away). */
+                    if (render_rc == 0 && out_idx == 0 &&
+                        framegrab_dir && framegrab_dir[0] != '\0' && !source_fade_active &&
+                        ((display_ltc_active && !framegrab_ltc_done) ||
+                         (!display_ltc_active && !framegrab_tod_done))) {
+                        uint8_t *grab_buf = gbm_backend_get_back_buffer(&g_backend.ctx.gbm);
+                        if (grab_buf &&
+                            gbm_backend_read_pixels(&g_backend.ctx.gbm, out_idx, grab_buf) == 0) {
+                            char path[512];
+                            snprintf(path, sizeof(path), "%s/%s.bmp", framegrab_dir,
+                                     display_ltc_active ? "ltc-live" : "tod-fallback");
+                            if (dump_render_buffer_bmp(path, grab_buf,
+                                                       out_fb_width, out_fb_height,
+                                                       out_fb_width * 4u) == 0) {
+                                if (display_ltc_active) framegrab_ltc_done = 1;
+                                else framegrab_tod_done = 1;
+                                printf("[FRAMEGRAB] Captured %s frame: %s\n",
+                                       display_ltc_active ? "LTC" : "ToD", path);
+                                fflush(stdout);
+                            }
+                        }
+                    }
+
+                    if (render_rc != 0 ||
                         display_backend_flip_output(&g_backend, out_idx) != 0) {
                         if (out_idx == 0) {
                             fprintf(stderr, "[MAIN] GPU render/flip failed on primary output\n");
