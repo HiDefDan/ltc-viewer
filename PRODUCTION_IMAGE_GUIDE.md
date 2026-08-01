@@ -161,6 +161,31 @@ systemd-analyze critical-chain ltc-timecode.service
 
 Expected: no active swap devices, and no `dev-zram0.swap` in the `critical-chain` output.
 
+## 5b. Halt/Poweroff Behavior (Watchdog Reboot Fix)
+
+Symptom: `sudo halt` (or a shutdown that stalls) reboots the unit instead of
+stopping it.
+
+Cause: Raspberry Pi OS enables the BCM2835 hardware watchdog via
+`/usr/lib/systemd/system.conf.d/40-rpi-enable-watchdog.conf`
+(`RuntimeWatchdogSec=1m`, `RebootWatchdogSec=2m`), and the bootloader
+EEPROM default `POWER_OFF_ON_HALT=0` means `halt` leaves the SoC powered in
+a spin loop. Nothing feeds the armed watchdog in that state, so it fires
+(≤60 s) and resets the SoC — a halt becomes a reboot. This is unrelated to
+the application's shutdown display blanking, which runs inside the
+service's `TimeoutStopSec=5` window and is SIGKILL-bounded.
+
+Fix — make halt actually cut power (keeps the runtime watchdog's hang
+protection, which a field appliance wants):
+
+```bash
+sudo rpi-eeprom-config --edit   # add: POWER_OFF_ON_HALT=1
+```
+
+Then use `sudo poweroff` (or `sudo halt`, now equivalent) to stop units.
+Validate: after `sudo poweroff`, the power LED goes out and the unit stays
+down until power-cycled.
+
 ## 6. HiFiBerry LTC Input Routing
 
 Detected card is expected to be card 2 (`sndrpihifiberry`).

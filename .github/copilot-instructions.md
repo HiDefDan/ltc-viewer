@@ -4,13 +4,13 @@
 - **Hardware Profile:** Raspberry Pi Compute Module 5 (CM5) appliance running headless.
 - **Operating System:** Raspberry Pi OS Lite (Debian Trixie / 13 Testing) with native `vc4-kms-v3d` full KMS active.
 - **Graphics Stack:** Raw, bare-metal DRM/KMS utilizing Generic Buffer Management (GBM) and OpenGL ES 2.0/3.0. No desktop environment, X11, or Wayland.
-- **Linked Libraries:** Managed via explicit compilation steps linking `libdrm`, `libgbm`, `libEGL`, `libGLESv2`, `libpng`, `libltc`, and `pthread`.
+- **Linked Libraries:** Managed via explicit compilation steps linking `libdrm`, `libgbm`, `libEGL`, `libGLESv2`, `libltc`, and `pthread`. Font rasterization is a vendored `stb_truetype.h` (no libpng/FreeType dependency).
 - **Audio Ingest:** Audio capture handled via ALSA (HiFiBerry target card).
 
 ## 2. Codebase Architecture & Boundaries
 The project splits backend targets to protect code integrity. Do not breach these boundaries:
 - `src/display-backend-gbm.c` & `src/drm.c`: Dedicated strictly to hardware-accelerated GBM allocation, EGL context binding, page-flipping, and DRM display layout orchestration.
-- `src/display-backend.c` & `src/font.c`: Handles display abstractions and font/glyph loading. **Constraint:** Font rendering must transition from direct pixel software-blitting into OpenGL ES texturing (GL glyph textures/vbos).
+- `src/display-backend.c`, `src/font-render.c` & `src/font.c`: Display abstraction, the shared TTF rasterizer (`font-render` — startup-only, feeds both the GL atlas and the CPU fallback), and the legacy CPU blitter kept as the documented field fallback. Glyphs are rasterized from `data/fonts/DSEG7Classic-Bold.ttf` at each output's native pixel size into per-output `GL_LUMINANCE` atlases.
 - `src/main.c`: Coordinates thread initialization and real-time capture dispatch loops.
 - `src/config-daemon.c` & `src/config-management.c`: Decoupled configuration management handling JSON-based parameters (`/etc/ltc-viewer/config.json`). Completely isolated from rendering files.
 
@@ -22,8 +22,8 @@ The project splits backend targets to protect code integrity. Do not breach thes
 - **Memory Hot-Path Safety:** No dynamic allocation (`malloc`, `calloc`, `realloc`) inside the high-frequency render loops (`HH:MM:SS:FF` refresh cadence). Use static, pre-allocated GBM swap chains.
 
 ## 4. Prioritised Execution Sequence
-1. **GBM/EGL Frame Synchronization:** Fix or tighten page-flipping mechanics to minimize sync-blocking or frame-drop latency when rendering across 3 independent displays simultaneously.
-2. **GLES Glyph Pipeline:** Ensure `src/font.c` assets map cleanly into GPU texture buffers instead of software pixel arrays.
+1. **GBM/EGL Frame Synchronization (DONE 2026-08-01):** Presentation is modeset-once + `drmModePageFlip(DRM_MODE_PAGE_FLIP_EVENT)` with per-BO cached framebuffers and flip-completion-driven loop pacing (`gbm_backend_wait_flips`). Preserve this: never reintroduce per-frame `drmModeSetCrtc`/`drmModeAddFB2` on the steady-state path.
+2. **GLES Glyph Pipeline (DONE 2026-08-01):** Glyphs rasterize from the vendored TTF into per-output native-size GPU atlases (`src/font-render.c` + `build_font_atlas`); no software pixel arrays on the presentation path.
 3. **Deterministic Threading:** Ensure rendering routines do not block or induce jitter into the high-priority real-time ALSA audio capture thread (`SCHED_FIFO`).
 4. **Daemon Integration:** Verify that runtime updates emitted by `ltc-config-daemon` reload gracefully via configuration watches without tearing or resetting the active EGL surface states.
 

@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-08-01
+
+### Added
+- Direct font rendering: new `src/font-render.c` / `include/font-render.h` rasterizes the 11-glyph timecode set (digits 0-9 + period) from a vendored DSEG7 Classic Bold TTF (`data/fonts/`, SIL OFL 1.1) via a vendored `third_party/stb_truetype.h`, replacing the pre-rendered PNG glyph assets everywhere. Measurement note: the old PNGs turn out to have been rendered from DSEG7 Classic **Bold Italic** at exactly 256 px (digit advance 209 px matches the TTF's 0.816 aspect precisely); the upright Bold now shipped renders identical geometry minus the ~4.7° slant. Swap in `DSEG7ClassicItalic-Bold.ttf` under the same filename to restore the slanted look.
+- Per-output native-resolution font atlases: each output rasterizes at its own clamped `TIMECODE_FONT_HEIGHT` target (`compute_native_glyph_height()`), so on-screen glyph scale is ~1.0 and GL_LINEAR resampling of scaled bitmaps is gone. Atlas is single-channel `GL_LUMINANCE` (4x less texture memory than the old RGBA strip), packed 6+5 in two padded rows. Glyph metric/UV tables moved from process globals into `ltc_gbm_output_t`; same-device sibling outputs still share the shader program but always build their own atlas (they can run different modes).
+- Async page-flip presentation (`src/display-backend-gbm.c`): `drmModeSetCrtc` now happens exactly once per output activation; every subsequent frame is presented with `drmModePageFlip(DRM_MODE_PAGE_FLIP_EVENT)` + `gbm_backend_wait_flips()` (poll + `drmHandleEvent` per DRM device fd, user_data disambiguates outputs sharing a fd). DRM framebuffer ids are cached on each `gbm_bo` via `gbm_bo_set_user_data` (kmscube pattern) — no per-frame `drmModeAddFB2`/`drmModeRmFB`, no steady-state allocation in the flip path. `eglSwapInterval(0)` keeps EGL from adding its own throttle. Driver-rejected flips fall back to the old blocking SetCrtc (logged once per output).
+- Flip-completion-driven main-loop pacing: the GBM path's fixed full-period `nanosleep` is replaced by blocking in `display_backend_wait_flips()` until the queued frames latch at vblank, so each iteration renders the freshest LTC frame with a full refresh period of margin. Outputs with a still-pending flip are skipped for a frame instead of blocking the others.
+- GBM-path framegrab: `LTC_FRAMEGRAB_DIR` now works on the live GPU path (`gbm_backend_read_pixels()` between render and flip, reusing `dump_render_buffer_bmp`); previously the hook only existed in the dead legacy software branch.
+- `PRODUCTION_IMAGE_GUIDE.md` section 5b: root-caused the halt-turns-into-reboot behavior (Pi OS arms the BCM2835 hardware watchdog via `40-rpi-enable-watchdog.conf`; EEPROM `POWER_OFF_ON_HALT=0` leaves the halted SoC powered with nobody feeding it) and documented the `POWER_OFF_ON_HALT=1` EEPROM fix. Unrelated to the app's shutdown blanking, which is `TimeoutStopSec`-bounded.
+
+### Changed
+- Shutdown display blanking uses a new synchronous present (`display_backend_flip_output_sync`) so the black frame is guaranteed on scanout before exit, instead of being queued behind a vblank event nobody would collect.
+- CPU-fallback renderer (`src/font.c`) consumes the same rasterizer at `FONT_GLYPH_HEIGHT` (256 px); its alpha-gamma LUT moved into the rasterizer (`FONT_ALPHA_GAMMA 0.90` now applied once, identically for GL and CPU paths). New `font_digit_advance()` replaces the compile-time `DISPLAY_DIGIT_WIDTH`.
+- `build_output_render_state()` takes per-output runtime metrics (`display_backend_output_digit_width/glyph_height`) instead of PNG-era compile-time constants; `DISPLAY_DIGIT_WIDTH`, `BACKGROUND_X`, and the RGBA atlas globals are gone. `TIMECODE_FONT_HEIGHT` (288) remains as the target glyph pixel height. Note: on the 1920x480 DSI canvas the width clamp would allow up to ~294 px — kept at 288 for visual parity, bump deliberately if wanted.
+
+### Removed
+- `data/glyphs/*.png` (11 pre-rendered glyph images), their install rule, `src/font-atlas.c` + `include/font-atlas.h` (197k-line dead generated atlas), and the entire libpng dependency from both binaries (`MAIN_PKGS`/`CONFIG_PKGS`).
+
 ## 2026-07-19 (2)
 
 ### Added
