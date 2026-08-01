@@ -1,16 +1,16 @@
 CC ?= gcc
 
 # Common compile flags
-BASE_CFLAGS = -std=c99 -Wall -Wextra -O2 -I./include
+BASE_CFLAGS = -std=c99 -Wall -Wextra -O2 -I./include -I./third_party
 
 # Package groups (queried individually so one missing .pc doesn't hide all others)
-MAIN_PKGS = libdrm libpng ltc rtaudio
-CONFIG_PKGS = libdrm libpng libmicrohttpd libwebsockets
+MAIN_PKGS = libdrm ltc rtaudio
+CONFIG_PKGS = libdrm libmicrohttpd libwebsockets
 
 # Resolve pkg-config flags package-by-package to avoid all-or-nothing failures
 MAIN_CFLAGS = $(BASE_CFLAGS) \
 	$(foreach p,$(MAIN_PKGS),$(shell pkg-config --cflags $(p) 2>/dev/null))
-MAIN_LDFLAGS = $(foreach p,$(MAIN_PKGS),$(shell pkg-config --libs $(p) 2>/dev/null)) -pthread -lltc -lgbm -lEGL -lGLESv2
+MAIN_LDFLAGS = $(foreach p,$(MAIN_PKGS),$(shell pkg-config --libs $(p) 2>/dev/null)) -pthread -lltc -lgbm -lEGL -lGLESv2 -lm
 
 CONFIG_CFLAGS = $(BASE_CFLAGS) \
 	$(foreach p,$(CONFIG_PKGS),$(shell pkg-config --cflags $(p) 2>/dev/null))
@@ -21,10 +21,10 @@ COMPILE_CFLAGS = $(BASE_CFLAGS) \
 	$(foreach p,$(MAIN_PKGS) $(CONFIG_PKGS),$(shell pkg-config --cflags $(p) 2>/dev/null))
 
 # Raspberry Pi CM5 native build
-# Build dependencies: sudo apt install -y git pkg-config build-essential xxd libdrm-dev libpng-dev libmicrohttpd-dev libwebsockets-dev libltc-dev libasound2-dev
+# Build dependencies: sudo apt install -y git pkg-config build-essential xxd libdrm-dev libmicrohttpd-dev libwebsockets-dev libltc-dev libasound2-dev
 
 # Main timecode application source files
-MAIN_SRCS = src/main.c src/drm.c src/display-backend.c src/display-backend-gbm.c src/font.c src/ltc.c src/gpio.c src/config-management.c src/config-watcher.c
+MAIN_SRCS = src/main.c src/drm.c src/display-backend.c src/display-backend-gbm.c src/font.c src/font-render.c src/ltc.c src/gpio.c src/config-management.c src/config-watcher.c
 MAIN_OBJS = $(MAIN_SRCS:.c=.o)
 MAIN_TARGET = ltc-timecode
 
@@ -62,8 +62,8 @@ install: all
 	install -m 755 $(MAIN_TARGET) /usr/local/bin/
 	install -m 755 $(CONFIG_TARGET) /usr/local/bin/
 	install -m 755 scripts/ltc-boot-tune.sh /usr/local/bin/
-	install -d /usr/share/ltc-timecode/glyphs
-	install -m 644 data/glyphs/*.png /usr/share/ltc-timecode/glyphs/
+	install -d /usr/share/ltc-timecode/fonts
+	install -m 644 data/fonts/* /usr/share/ltc-timecode/fonts/
 	install -m 644 systemd/ltc-boot-tune.service /etc/systemd/system/
 	install -m 644 systemd/ltc-timecode.service /etc/systemd/system/
 	install -m 644 systemd/ltc-config.service /etc/systemd/system/
@@ -83,7 +83,7 @@ uninstall:
 	rm -f /usr/local/bin/$(MAIN_TARGET)
 	rm -f /usr/local/bin/$(CONFIG_TARGET)
 	rm -f /usr/local/bin/ltc-boot-tune.sh
-	rm -rf /usr/share/ltc-timecode/glyphs
+	rm -rf /usr/share/ltc-timecode
 	rm -f /etc/systemd/system/ltc-boot-tune.service
 	rm -f /etc/systemd/system/ltc-timecode.service
 	rm -f /etc/systemd/system/ltc-config.service

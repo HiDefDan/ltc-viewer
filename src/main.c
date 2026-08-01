@@ -480,6 +480,7 @@ static inline void timecode_fade_alphas(uint64_t elapsed_ns, uint64_t duration_n
  * scaled/positioned layouts from the same logical content. */
 static void build_output_render_state(gbm_render_state_t *out_state,
                                       uint32_t fb_width, uint32_t fb_height,
+                                      uint32_t digit_w, uint32_t glyph_h,
                                       int x_offset, int y_offset,
                                       const char *timecode_str,
                                       uint32_t target_text_color,
@@ -496,24 +497,27 @@ static void build_output_render_state(gbm_render_state_t *out_state,
     uint32_t render_width = portrait_mode ? fb_height : fb_width;
     uint32_t render_height = portrait_mode ? fb_width : fb_height;
 
-    float base_scale_x = (float)render_width / (float)DISPLAY_WIDTH;
-    float base_scale_y = (float)render_height / (float)DISPLAY_HEIGHT;
-    float base_scale = (base_scale_x < base_scale_y) ? base_scale_x : base_scale_y;
-
-    float target_scale = (float)TIMECODE_FONT_HEIGHT / (float)FONT_GLYPH_HEIGHT;
-    float max_scale_h = (float)render_height / (float)FONT_GLYPH_HEIGHT;
-    float max_scale_bg = (float)render_width / (float)(8 * DISPLAY_DIGIT_WIDTH);
+    /* The atlas is rasterized at this output's native glyph size (the
+     * TIMECODE_FONT_HEIGHT target pre-clamped to fit this mode), so the
+     * draw scale is 1.0. The clamp below only guards the transient where
+     * mode and atlas disagree (e.g. mid mode-change) — it can only shrink,
+     * never enlarge, so glyphs stay unresampled in the steady state. */
+    if (digit_w == 0 || glyph_h == 0) {
+        digit_w = 1;
+        glyph_h = 1;
+    }
+    float glyph_scale = 1.0f;
+    float max_scale_h = (float)render_height / (float)glyph_h;
+    float max_scale_bg = (float)render_width / (float)(8 * digit_w);
     float max_safe_scale = (max_scale_h < max_scale_bg) ? max_scale_h : max_scale_bg;
-
-    float glyph_scale = target_scale;
     if (glyph_scale > max_safe_scale) {
         glyph_scale = max_safe_scale;
     }
     if (glyph_scale <= 0.0f) {
-        glyph_scale = (base_scale > 0.0f) ? base_scale : 1.0f;
+        glyph_scale = 1.0f;
     }
 
-    uint32_t scaled_glyph_height = (uint32_t)(FONT_GLYPH_HEIGHT * glyph_scale + 0.5f);
+    uint32_t scaled_glyph_height = (uint32_t)(glyph_h * glyph_scale + 0.5f);
     int32_t center_y = (render_height > scaled_glyph_height) ?
                        (int32_t)((render_height - scaled_glyph_height) / 2) : 0;
     int32_t text_y_final = center_y + y_offset;
@@ -529,9 +533,9 @@ static void build_output_render_state(gbm_render_state_t *out_state,
         text_y_final = max_text_y;
     }
 
-    uint32_t base_string_width = 8 * DISPLAY_DIGIT_WIDTH;
+    uint32_t base_string_width = 8 * digit_w;
     uint32_t scaled_string_width = (uint32_t)(base_string_width * glyph_scale + 0.5f);
-    uint32_t scaled_digit_width = (uint32_t)(DISPLAY_DIGIT_WIDTH * glyph_scale + 0.5f);
+    uint32_t scaled_digit_width = (uint32_t)(digit_w * glyph_scale + 0.5f);
     if (scaled_digit_width == 0) {
         scaled_digit_width = 1;
     }
@@ -972,7 +976,7 @@ int main(int argc, char *argv[]) {
          */
         float target_scale = (float)TIMECODE_FONT_HEIGHT / (float)FONT_GLYPH_HEIGHT;
         float max_scale_h = (float)render_height / (float)FONT_GLYPH_HEIGHT;
-        float max_scale_bg = (float)render_width / (float)(8 * DISPLAY_DIGIT_WIDTH);
+        float max_scale_bg = (float)render_width / (float)(8 * font_digit_advance());
         float max_safe_scale = (max_scale_h < max_scale_bg) ? max_scale_h : max_scale_bg;
 
         float glyph_scale = target_scale;
@@ -1235,11 +1239,11 @@ int main(int argc, char *argv[]) {
 
             /* Calculate scaled string width for horizontal centering */
             /* Timecode is "HH.MM.SS.FF" = 8 digits + 3 periods (periods overlay, spacing=0) */
-            uint32_t base_string_width = 8 * DISPLAY_DIGIT_WIDTH;
+            uint32_t base_string_width = 8 * font_digit_advance();
             uint32_t scaled_string_width = (uint32_t)(base_string_width * glyph_scale + 0.5f);
 
             /* Calculate scaled digit width for background bounds */
-            uint32_t scaled_digit_width = (uint32_t)(DISPLAY_DIGIT_WIDTH * glyph_scale + 0.5f);
+            uint32_t scaled_digit_width = (uint32_t)(font_digit_advance() * glyph_scale + 0.5f);
             if (scaled_digit_width == 0) {
                 scaled_digit_width = 1;
             }
@@ -1320,7 +1324,6 @@ int main(int argc, char *argv[]) {
                     if (!display_backend_output_active(&g_backend, out_idx)) {
                         continue;
                     }
-
                     uint32_t out_fb_width = display_backend_output_width(&g_backend, out_idx);
                     uint32_t out_fb_height = display_backend_output_height(&g_backend, out_idx);
 
@@ -1340,6 +1343,8 @@ int main(int argc, char *argv[]) {
 
                     gbm_render_state_t gbm_state;
                     build_output_render_state(&gbm_state, out_fb_width, out_fb_height,
+                                               display_backend_output_digit_width(&g_backend, out_idx),
+                                               display_backend_output_glyph_height(&g_backend, out_idx),
                                                out_x_offset, out_y_offset,
                                                timecode_str, target_text_color, bg_color,
                                                source_fade_active,
@@ -1556,7 +1561,7 @@ int main(int argc, char *argv[]) {
                     }
 
                     if (df_flag) {
-                        uint32_t df_x = overlay_x + (uint32_t)(16.0f * DISPLAY_DIGIT_WIDTH * overlay_scale);
+                        uint32_t df_x = overlay_x + (uint32_t)(16.0f * font_digit_advance() * overlay_scale);
                         draw_df_badge(render_buffer, fb_width, fb_height, render_pitch,
                                       render_width, render_height, portrait_mode,
                                       df_x, overlay_y,

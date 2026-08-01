@@ -4,21 +4,24 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Pixel height the CPU-fallback glyphs are rasterized at (the scaled-glyph
+   LRU cache rescales from this base at blit time). */
 #define FONT_GLYPH_HEIGHT 256
 
-/* 7-segment display font renderer:
-   Loads 11 individual 8-bit grayscale PNG files (digits 0-9 and period).
-   Optionally loads background layer from bg_time.png (unlit 7-segment grid).
-   Renders timecode to ARGB8888 framebuffer with optional background.
-   
+/* CPU-fallback 7-segment font renderer:
+   Rasterizes 11 glyphs (digits 0-9 and period) from the vendored DSEG7 TTF
+   via the font-render module and blits them to an ARGB8888 framebuffer.
+
    Format:
    - System time fallback: HH.MM.SS (3 periods separating hours, minutes, seconds)
-   - LTC timecode input: HH.MM.SS.FF (3 periods, with frame numbers 0-30 at 30Hz)
-   
-   Files loaded from /usr/share/ltc-timecode/glyphs/ at runtime. */
+   - LTC timecode input: HH.MM.SS.FF (3 periods, with frame numbers 0-30 at 30Hz) */
 
-/* Initialize font: loads 11 PNG glyphs from DSEG_digits/ */
+/* Initialize font: rasterizes the 11-glyph set at FONT_GLYPH_HEIGHT */
 int font_init(void);
+
+/* Digit cell advance in px at the base FONT_GLYPH_HEIGHT rasterization
+   (valid after font_init; never 0). */
+uint32_t font_digit_advance(void);
 
 /* Prepare background layer (glyph-based unlit 7-segment grid) */
 void font_load_background(void);

@@ -177,6 +177,24 @@ uint32_t display_backend_output_connector_type_id(const display_backend_t *backe
     return 0;
 }
 
+uint32_t display_backend_output_digit_width(const display_backend_t *backend, int idx)
+{
+    if (!backend) return 0;
+    if (backend->type == DISPLAY_BACKEND_GBM) {
+        return gbm_backend_output_digit_width(&backend->ctx.gbm, idx);
+    }
+    return 0;
+}
+
+uint32_t display_backend_output_glyph_height(const display_backend_t *backend, int idx)
+{
+    if (!backend) return 0;
+    if (backend->type == DISPLAY_BACKEND_GBM) {
+        return gbm_backend_output_glyph_height(&backend->ctx.gbm, idx);
+    }
+    return 0;
+}
+
 int display_backend_render_output(display_backend_t *backend, int idx, const gbm_render_state_t *state)
 {
     if (!backend || !state) return -1;

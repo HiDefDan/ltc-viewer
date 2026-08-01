@@ -12,9 +12,7 @@
 /* Display layout */
 #define TIMECODE_X              80
 #define TIMECODE_Y              90
-#define DISPLAY_DIGIT_WIDTH     209             /* Match actual digit spacing width from font renderer */
-#define BACKGROUND_X            (TIMECODE_X - DISPLAY_DIGIT_WIDTH)  /* Background starts 1 digit before timecode */
-#define TIMECODE_FONT_HEIGHT    288             /* Target glyph height at 1920x480 baseline */
+#define TIMECODE_FONT_HEIGHT    288             /* Target glyph pixel height (clamped per output mode) */
 
 /* Colors (ARGB8888) */
 #define COLOR_BLACK             0xFF000000

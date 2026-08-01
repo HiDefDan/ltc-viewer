@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <png.h>
 #include <errno.h>
 #include <math.h>
 #include <EGL/egl.h>
@@ -15,144 +14,127 @@
 #include <xf86drmMode.h>
 #include "display-backend-gbm.h"
 #include "font.h"
+#include "font-render.h"
 #include "config.h"
 
-// Font atlas UV/metrics tables: pure data describing the glyph atlas layout,
-// identical no matter which GPU/context built the texture, so these can
-// stay process-global. The GL objects themselves (texture, program) are
-// NOT global — see ltc_gbm_output_t::font_atlas_tex/prog — because DSI and
-// HDMI on this platform can be on entirely separate DRM devices with no
-// shared GL object namespace.
-#define GLYPH_COUNT 11
-static float glyph_uv[GLYPH_COUNT][4];
-static uint32_t glyph_width[GLYPH_COUNT];
-static uint32_t glyph_height[GLYPH_COUNT];
-static uint32_t glyph_spacing[GLYPH_COUNT];
+#define GLYPH_COUNT LTC_GBM_GLYPH_COUNT
 
-static uint8_t *load_png_rgba(const char *filename, uint32_t *w, uint32_t *h) {
-    FILE *fp = fopen(filename, "rb");
-    if (!fp) return NULL;
-    png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!png) { fclose(fp); return NULL; }
-    png_infop info = png_create_info_struct(png);
-    if (!info) { png_destroy_read_struct(&png, NULL, NULL); fclose(fp); return NULL; }
-    png_init_io(png, fp);
-    png_read_info(png, info);
-    *w = png_get_image_width(png, info);
-    *h = png_get_image_height(png, info);
+/* Padding between atlas cells so GL_LINEAR sampling (especially the ~0.23x
+ * minified debug overlay) never bleeds a neighboring glyph's texels in. */
+#define ATLAS_CELL_PAD 2
+#define ATLAS_ROW0_GLYPHS 6 /* glyphs 0-5 on row 0, 6-9 + period on row 1 */
 
-    png_byte color_type = png_get_color_type(png, info);
-    png_byte bit_depth = png_get_bit_depth(png, info);
-    int has_alpha = (color_type & PNG_COLOR_MASK_ALPHA) || png_get_valid(png, info, PNG_INFO_tRNS);
-
-    if (color_type == PNG_COLOR_TYPE_PALETTE) {
-        png_set_palette_to_rgb(png);
+/* Native glyph pixel height for this output: the TIMECODE_FONT_HEIGHT
+ * target, capped so the glyph fits the logical landscape height and the
+ * 8-digit string fits the logical width — the same clamp semantics the
+ * scale math applied when glyphs were fixed-size assets. Rasterizing at
+ * this size makes the on-screen glyph scale ~1.0. */
+static uint32_t compute_native_glyph_height(const ltc_gbm_output_t *out) {
+    uint32_t render_w = out->width;
+    uint32_t render_h = out->height;
+    if (render_h > render_w) { /* portrait panel: logical canvas is rotated */
+        render_w = out->height;
+        render_h = out->width;
     }
-    if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) {
-        png_set_expand_gray_1_2_4_to_8(png);
+    float aspect = font_render_digit_aspect();
+    if (aspect <= 0.0f || render_w == 0 || render_h == 0) {
+        return 0;
     }
-    if (png_get_valid(png, info, PNG_INFO_tRNS)) {
-        png_set_tRNS_to_alpha(png);
-        has_alpha = 1;
+    float px = (float)TIMECODE_FONT_HEIGHT;
+    if ((float)render_h < px) {
+        px = (float)render_h;
     }
-    if (color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA) {
-        png_set_gray_to_rgb(png);
+    float max_from_width = (float)render_w / (8.0f * aspect);
+    if (max_from_width < px) {
+        px = max_from_width;
     }
-    if (!has_alpha) {
-        png_set_add_alpha(png, 0xFF, PNG_FILLER_AFTER);
+    if (px < 8.0f) {
+        px = 8.0f;
     }
-    png_set_strip_16(png);
-    png_set_packing(png);
-    png_read_update_info(png, info);
-    size_t rowbytes = png_get_rowbytes(png, info);
-    uint8_t *pixels = malloc(rowbytes * (*h));
-    if (!pixels) { png_destroy_read_struct(&png, &info, NULL); fclose(fp); return NULL; }
-    png_bytep *rows = malloc(sizeof(png_bytep) * (*h));
-    if (!rows) { free(pixels); png_destroy_read_struct(&png, &info, NULL); fclose(fp); return NULL; }
-    for (uint32_t y = 0; y < *h; y++) rows[y] = pixels + y * rowbytes;
-    png_read_image(png, rows);
-    free(rows);
-    png_destroy_read_struct(&png, &info, NULL);
-    fclose(fp);
-    return pixels;
+    return (uint32_t)px;
 }
 
-static const char *glyphs_dir(void) {
-    static const char *installed = "/usr/share/ltc-timecode/glyphs";
-    static const char *source = "data/glyphs";
-    if (access(installed, R_OK) == 0) {
-        return installed;
-    }
-    return source;
-}
-
-/* Builds a font atlas texture in whatever EGL context is currently bound
- * and writes its texture name to *out_tex. Must be called once per distinct
- * EGL context group (i.e. once per output that doesn't already have a
- * same-device sibling to copy GL object names from). */
-static int build_font_atlas(GLuint *out_tex) {
-    const char *glyphs[GLYPH_COUNT] = {"0","1","2","3","4","5","6","7","8","9","period"};
-    const char *dir = glyphs_dir();
-    uint32_t gw[GLYPH_COUNT] = {0}, gh[GLYPH_COUNT] = {0};
-    uint8_t *gimg[GLYPH_COUNT] = {0};
-    uint32_t total_w = 0, max_h = 0;
-    for (int i = 0; i < GLYPH_COUNT; i++) {
-        char path[256];
-        snprintf(path, sizeof(path), "%s/%s.png", dir, glyphs[i]);
-        gimg[i] = load_png_rgba(path, &gw[i], &gh[i]);
-        if (!gimg[i]) {
-            fprintf(stderr, "[GBM] Failed to load glyph image: %s\n", path);
-            for (int j = 0; j < i; j++) free(gimg[j]);
-            return -1;
-        }
-        total_w += gw[i];
-        if (gh[i] > max_h) max_h = gh[i];
-    }
-    uint8_t *atlas = calloc(total_w * max_h, 4);
-    if (!atlas) {
-        for (int i = 0; i < GLYPH_COUNT; i++) free(gimg[i]);
+/* Rasterizes the glyph set at this output's native pixel size and uploads
+ * it as a single-channel (GL_LUMINANCE) atlas texture in whatever EGL
+ * context is currently bound, filling the output's metric/UV tables.
+ * Every output gets its own atlas: outputs on one DRM device share a GL
+ * namespace but can still run different modes, hence different sizes. */
+static int build_font_atlas(ltc_gbm_output_t *out) {
+    uint32_t px = compute_native_glyph_height(out);
+    if (px == 0) {
+        fprintf(stderr, "[GBM] Cannot size font atlas for %ux%u output\n", out->width, out->height);
         return -1;
     }
-    uint32_t x = 0;
-    for (int i = 0; i < GLYPH_COUNT; i++) {
-        for (uint32_t row = 0; row < gh[i]; row++) {
-            memcpy(atlas + 4 * (x + row * total_w), gimg[i] + 4 * (row * gw[i]), 4 * gw[i]);
-        }
-        glyph_width[i] = gw[i];
-        glyph_height[i] = gh[i];
-        glyph_spacing[i] = (i == 10) ? 0 : gw[i];
-        glyph_uv[i][0] = (float)x / (float)total_w;
-        glyph_uv[i][1] = 0.0f;
-        glyph_uv[i][2] = (float)(x + gw[i]) / (float)total_w;
-        glyph_uv[i][3] = (float)gh[i] / (float)max_h;
-        x += gw[i];
-        free(gimg[i]);
+
+    fr_glyph_set_t set;
+    if (font_render_rasterize_set(&set, px) != 0) {
+        fprintf(stderr, "[GBM] Font rasterization failed at %u px\n", px);
+        return -1;
     }
-    uint8_t min_alpha = 255;
-    uint8_t max_alpha = 0;
-    uint64_t alpha_sum = 0;
+
+    uint32_t row_w[2] = {0, 0};
+    for (int i = 0; i < GLYPH_COUNT; i++) {
+        int r = (i < ATLAS_ROW0_GLYPHS) ? 0 : 1;
+        row_w[r] += set.glyphs[i].cell_w + ATLAS_CELL_PAD;
+    }
+    uint32_t atlas_w = (row_w[0] > row_w[1]) ? row_w[0] : row_w[1];
+    uint32_t atlas_h = 2u * (set.cell_h + ATLAS_CELL_PAD);
+
+    GLint max_tex = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
+    if (max_tex > 0 && (atlas_w > (uint32_t)max_tex || atlas_h > (uint32_t)max_tex)) {
+        fprintf(stderr, "[GBM] Font atlas %ux%u exceeds GL_MAX_TEXTURE_SIZE %d\n",
+                atlas_w, atlas_h, max_tex);
+        font_render_free_set(&set);
+        return -1;
+    }
+
+    uint8_t *atlas = calloc((size_t)atlas_w * atlas_h, 1);
+    if (!atlas) {
+        font_render_free_set(&set);
+        return -1;
+    }
+
+    uint32_t x = 0, y = 0;
+    for (int i = 0; i < GLYPH_COUNT; i++) {
+        if (i == ATLAS_ROW0_GLYPHS) {
+            x = 0;
+            y = set.cell_h + ATLAS_CELL_PAD;
+        }
+        const fr_glyph_t *g = &set.glyphs[i];
+        for (uint32_t row = 0; row < g->cell_h; row++) {
+            memcpy(atlas + (size_t)(y + row) * atlas_w + x,
+                   g->bitmap + (size_t)row * g->cell_w, g->cell_w);
+        }
+        out->glyph_width[i] = g->cell_w;
+        out->glyph_height[i] = g->cell_h;
+        out->glyph_spacing[i] = g->advance;
+        out->glyph_uv[i][0] = (float)x / (float)atlas_w;
+        out->glyph_uv[i][1] = (float)y / (float)atlas_h;
+        out->glyph_uv[i][2] = (float)(x + g->cell_w) / (float)atlas_w;
+        out->glyph_uv[i][3] = (float)(y + g->cell_h) / (float)atlas_h;
+        x += g->cell_w + ATLAS_CELL_PAD;
+    }
+    out->atlas_digit_w = set.digit_cell_w;
+    out->atlas_cell_h = set.cell_h;
+    font_render_free_set(&set);
 
     GLuint tex = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, total_w, max_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, atlas_w, atlas_h, 0,
+                 GL_LUMINANCE, GL_UNSIGNED_BYTE, atlas);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    free(atlas);
 
-    for (uint32_t i = 3; i < total_w * max_h * 4; i += 4) {
-        uint8_t a = atlas[i];
-        if (a < min_alpha) min_alpha = a;
-        if (a > max_alpha) max_alpha = a;
-        alpha_sum += a;
-    }
-    fprintf(stderr, "[GBM] font atlas alpha range [%u..%u] avg=%.1f\n",
-            min_alpha, max_alpha, (double)alpha_sum / (double)(total_w * max_h));
+    fprintf(stderr, "[GBM] font atlas %ux%u (glyph %upx, digit_w %upx) for %ux%u output\n",
+            atlas_w, atlas_h, set.cell_h, out->atlas_digit_w, out->width, out->height);
     fflush(stderr);
 
-    free(atlas);
-    *out_tex = tex;
+    out->font_atlas_tex = tex;
     return 0;
 }
 
@@ -297,7 +279,7 @@ static void gbm_backend_draw_text(ltc_gbm_output_t *out,
 
     float cur_x = x;
     float prev_x = x;
-    float glyph_h = (float)glyph_height[0] * scale;
+    float glyph_h = (float)out->glyph_height[0] * scale;
     float period_lift = scale + 0.5f;
 
     for (const char *p = text; *p; p++) {
@@ -306,9 +288,9 @@ static void gbm_backend_draw_text(ltc_gbm_output_t *out,
             continue;
         }
 
-        float width = (float)glyph_width[idx] * scale;
-        float spacing = (float)glyph_spacing[idx] * scale;
-        if (spacing == 0.0f && glyph_spacing[idx] > 0) {
+        float width = (float)out->glyph_width[idx] * scale;
+        float spacing = (float)out->glyph_spacing[idx] * scale;
+        if (spacing == 0.0f && out->glyph_spacing[idx] > 0) {
             spacing = 1.0f;
         }
 
@@ -325,8 +307,8 @@ static void gbm_backend_draw_text(ltc_gbm_output_t *out,
         float y1 = draw_y + glyph_h;
 
         gbm_backend_draw_quad(out, x0, y0, x1, y1,
-                             glyph_uv[idx][0], glyph_uv[idx][1],
-                             glyph_uv[idx][2], glyph_uv[idx][3],
+                             out->glyph_uv[idx][0], out->glyph_uv[idx][1],
+                             out->glyph_uv[idx][2], out->glyph_uv[idx][3],
                              color, use_alpha,
                              portrait_mode,
                              logical_width, logical_height);
@@ -473,7 +455,7 @@ static int gbm_render_to_output(ltc_gbm_output_t *out, const gbm_render_state_t 
                              state->logical_width,
                              state->logical_height);
         if (state->df_flag) {
-            float df_x = 12.0f + 16.0f * (float)DISPLAY_DIGIT_WIDTH * state->overlay_scale;
+            float df_x = 12.0f + 16.0f * (float)out->atlas_digit_w * state->overlay_scale;
             gbm_backend_draw_df_badge(out, (uint32_t)df_x, 12u,
                                       state->overlay_scale * 0.72f,
                                       state->overlay_color,
@@ -807,23 +789,29 @@ static int activate_output(ltc_gbm_context_t *ctx, int idx, int fd, uint32_t con
 
     if (sibling) {
         /* Same drm fd as an existing output: shares this context's object
-         * namespace, so the sibling's GL object names are valid here too. */
-        out->font_atlas_tex = sibling->font_atlas_tex;
+         * namespace, so the sibling's program name is valid here too. */
         out->prog = sibling->prog;
         out->text_color_loc = sibling->text_color_loc;
         out->text_tex_loc = sibling->text_tex_loc;
     } else {
-        if (build_font_atlas(&out->font_atlas_tex) != 0) {
-            fprintf(stderr, "[GBM] Failed to build font atlas for connector %u\n", connector_id); fflush(stderr);
-            eglDestroySurface(dev->egl_display, out->egl_surface);
-            eglDestroyContext(dev->egl_display, out->egl_context);
-            out->egl_surface = EGL_NO_SURFACE;
-            out->egl_context = EGL_NO_CONTEXT;
-            gbm_surface_destroy(out->gbm_surf);
-            out->gbm_surf = NULL;
-            return -1;
-        }
         setup_shader(&out->prog, &out->text_color_loc, &out->text_tex_loc);
+    }
+
+    /* Atlas is always per-output: it's rasterized at this output's native
+     * mode size, which a same-device sibling running a different mode
+     * cannot share. */
+    if (build_font_atlas(out) != 0) {
+        fprintf(stderr, "[GBM] Failed to build font atlas for connector %u\n", connector_id); fflush(stderr);
+        eglDestroySurface(dev->egl_display, out->egl_surface);
+        eglDestroyContext(dev->egl_display, out->egl_context);
+        out->egl_surface = EGL_NO_SURFACE;
+        out->egl_context = EGL_NO_CONTEXT;
+        gbm_surface_destroy(out->gbm_surf);
+        out->gbm_surf = NULL;
+        return -1;
+    }
+
+    if (!sibling) {
         glViewport(0, 0, out->width, out->height);
         glClearColor(0.1f, 0.2f, 0.3f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -859,6 +847,16 @@ void gbm_backend_deactivate_output(ltc_gbm_context_t *ctx, int idx) {
     }
     if (dev_idx >= 0 && ctx->devices[dev_idx].egl_display != EGL_NO_DISPLAY) {
         EGLDisplay dpy = ctx->devices[dev_idx].egl_display;
+        /* The atlas texture is owned exclusively by this output, but a
+         * sibling context in the same share group would keep it alive after
+         * this context dies — delete it explicitly. The program stays: it
+         * may be shared with a surviving sibling. */
+        if (out->font_atlas_tex &&
+            out->egl_context != EGL_NO_CONTEXT && out->egl_surface != EGL_NO_SURFACE &&
+            eglMakeCurrent(dpy, out->egl_surface, out->egl_surface, out->egl_context)) {
+            glDeleteTextures(1, &out->font_atlas_tex);
+            eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        }
         if (out->egl_surface != EGL_NO_SURFACE) eglDestroySurface(dpy, out->egl_surface);
         if (out->egl_context != EGL_NO_CONTEXT) eglDestroyContext(dpy, out->egl_context);
     }
@@ -1166,6 +1164,16 @@ uint32_t gbm_backend_output_connector_type(const ltc_gbm_context_t *ctx, int idx
 uint32_t gbm_backend_output_connector_type_id(const ltc_gbm_context_t *ctx, int idx) {
     if (!ctx || idx < 0 || idx >= ctx->output_count) return 0;
     return ctx->outputs[idx].connector_type_id;
+}
+
+uint32_t gbm_backend_output_digit_width(const ltc_gbm_context_t *ctx, int idx) {
+    if (!ctx || idx < 0 || idx >= ctx->output_count) return 0;
+    return ctx->outputs[idx].atlas_digit_w;
+}
+
+uint32_t gbm_backend_output_glyph_height(const ltc_gbm_context_t *ctx, int idx) {
+    if (!ctx || idx < 0 || idx >= ctx->output_count) return 0;
+    return ctx->outputs[idx].atlas_cell_h;
 }
 
 uint32_t gbm_backend_back_width(const ltc_gbm_context_t *ctx) {

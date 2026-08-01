@@ -50,6 +50,9 @@ uint32_t display_backend_output_height(const display_backend_t *backend, int idx
 float display_backend_output_refresh_hz(const display_backend_t *backend, int idx);
 uint32_t display_backend_output_connector_type(const display_backend_t *backend, int idx);
 uint32_t display_backend_output_connector_type_id(const display_backend_t *backend, int idx);
+/* Native glyph metrics of the output's font atlas (px); 0 if unavailable. */
+uint32_t display_backend_output_digit_width(const display_backend_t *backend, int idx);
+uint32_t display_backend_output_glyph_height(const display_backend_t *backend, int idx);
 int display_backend_render_output(display_backend_t *backend, int idx, const gbm_render_state_t *state);
 int display_backend_flip_output(display_backend_t *backend, int idx);
 

@@ -66,14 +66,18 @@ typedef struct {
     EGLConfig egl_config;
 } ltc_gbm_device_t;
 
+#define LTC_GBM_GLYPH_COUNT 11 /* digits 0-9 + period */
+
 /* Per-connector scanout state. Output 0 is always the primary/permanent
  * display (DSI, or HDMI if no DSI is present). Outputs 1..N are HDMI
  * connectors that come and go via hotplug — possibly on a different
- * physical DRM device than output 0 (see drm_fd). Each output carries its
- * own copy of the font atlas texture / glyph shader: outputs on the same
- * drm_fd share one EGL context group (so these are the same GL object names
- * for them), but outputs on a *different* drm_fd cannot share GL objects at
- * all, and need their own atlas/program built in their own context. */
+ * physical DRM device than output 0 (see drm_fd). Every output owns its own
+ * font atlas texture, rasterized from the vendored TTF at that output's
+ * native glyph pixel size (so the on-screen scale is ~1.0 and no GL_LINEAR
+ * resampling occurs) — which is also why the glyph metric/UV tables live
+ * here rather than as process globals. The glyph shader *program* is shared
+ * between outputs on the same drm_fd (one EGL context group); outputs on a
+ * different drm_fd have no shared GL namespace and build their own. */
 typedef struct {
     int active;
     int drm_fd; /* which ltc_gbm_device_t (by drm_fd) this output scans out on */
@@ -94,6 +98,12 @@ typedef struct {
     GLuint prog;
     GLint text_color_loc;
     GLint text_tex_loc;
+    float glyph_uv[LTC_GBM_GLYPH_COUNT][4];
+    uint32_t glyph_width[LTC_GBM_GLYPH_COUNT];
+    uint32_t glyph_height[LTC_GBM_GLYPH_COUNT];
+    uint32_t glyph_spacing[LTC_GBM_GLYPH_COUNT];
+    uint32_t atlas_digit_w; /* uniform digit cell width in the atlas, px */
+    uint32_t atlas_cell_h;  /* uniform glyph cell height in the atlas, px */
 } ltc_gbm_output_t;
 
 /* A known HDMI-type connector, recorded at startup from every DRM device on
@@ -139,7 +149,12 @@ uint32_t gbm_backend_output_height(const ltc_gbm_context_t *ctx, int idx);
 float gbm_backend_output_refresh_hz(const ltc_gbm_context_t *ctx, int idx);
 uint32_t gbm_backend_output_connector_type(const ltc_gbm_context_t *ctx, int idx);
 uint32_t gbm_backend_output_connector_type_id(const ltc_gbm_context_t *ctx, int idx);
+/* Native glyph metrics of the output's font atlas (px). Layout math in
+ * main.c uses these instead of compile-time asset constants. */
+uint32_t gbm_backend_output_digit_width(const ltc_gbm_context_t *ctx, int idx);
+uint32_t gbm_backend_output_glyph_height(const ltc_gbm_context_t *ctx, int idx);
 int gbm_backend_render_output(ltc_gbm_context_t *ctx, int idx, const gbm_render_state_t *state);
+
 int gbm_backend_flip_output(ltc_gbm_context_t *ctx, int idx);
 
 /* Rescan known HDMI connectors (across every DRM device found at startup)
