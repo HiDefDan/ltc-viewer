@@ -206,6 +206,42 @@ sudo rpi-eeprom-config --edit   # add: POWER_OFF_ON_HALT=1
 Validate: after `sudo poweroff`, the power LED goes out and the unit stays
 down until power-cycled.
 
+## 5c. Diagnostics (Off by Default — Two Reversible Toggles)
+
+Both were needed to root-cause the shutdown hang above and are otherwise
+kept off in normal operation to minimize noise/writes on this appliance.
+
+**Per-frame application logging.** `ltc-timecode` normally logs only
+transitions — LTC lock/unlock, gaps, layout changes — not one line per
+rendered frame or decoded LTC frame (that's 25-60 lines/sec of no
+diagnostic value in steady state). For a deep debugging session, set
+`LTC_LOG_VERBOSE=1` in the environment (e.g. add to
+`systemd/ltc-timecode.service`'s `Environment=` lines, or run the binary
+directly with it set) to restore full per-frame logging. Unset/remove to
+go back to normal.
+
+**Persistent journald storage.** Raspberry Pi OS ships
+`Storage=volatile` by default (`/usr/lib/systemd/journald.conf.d/
+40-rpi-volatile-storage.conf`) to minimize SD card writes — meaning a
+crash or hard reset (e.g. a watchdog-forced reboot) wipes all logs from
+the boot that just ended, which is exactly the boot you'd want to inspect.
+Enable persistence temporarily when chasing a shutdown/crash issue:
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d
+printf '[Journal]\nStorage=persistent\n' | sudo tee /etc/systemd/journald.conf.d/50-persistent-storage.conf
+sudo systemctl restart systemd-journald
+```
+
+After reproducing, read the previous boot's log with
+`journalctl -b -1 --no-pager`. Revert once done (SD wear + disk usage
+matter on a field appliance):
+
+```bash
+sudo rm /etc/systemd/journald.conf.d/50-persistent-storage.conf
+sudo systemctl restart systemd-journald
+```
+
 ## 6. HiFiBerry LTC Input Routing
 
 Detected card is expected to be card 2 (`sndrpihifiberry`).

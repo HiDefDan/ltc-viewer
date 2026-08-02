@@ -24,6 +24,9 @@
 
 static volatile int should_exit = 0;
 
+/* Definition for the extern declared in config.h. */
+int g_log_verbose = 0;
+
 /* Shutdown hard-exit backstop (spawned at the top of main()'s shutdown
  * path, before any teardown call runs). Root-caused 2026-08-02 via
  * checkpoint logging: a full `poweroff`/`halt` reliably hangs the entire
@@ -847,6 +850,10 @@ int main(int argc, char *argv[]) {
     uint64_t ltc_live_sleep_min_ns = (uint64_t)read_env_u32("LTC_LIVE_SLEEP_MIN_US", 100, 50, 5000) * 1000ULL;
     uint64_t ltc_live_sleep_max_ns = (uint64_t)read_env_u32("LTC_LIVE_SLEEP_MAX_US", 2000, 100, 10000) * 1000ULL;
     unsigned int fade_test_period_ms = read_env_u32("LTC_FADE_TEST_PERIOD_MS", 0, 0, 60000);
+    g_log_verbose = (int)read_env_u32("LTC_LOG_VERBOSE", 0, 0, 1);
+    if (g_log_verbose) {
+        printf("[MAIN] LTC_LOG_VERBOSE=1: logging every rendered/decoded frame (noisy — for debugging only)\n");
+    }
 
     rtaudio_stream_options_t rta_opts;
     memset(&rta_opts, 0, sizeof(rta_opts));
@@ -1780,53 +1787,28 @@ int main(int argc, char *argv[]) {
             double half_scan_ms = (display_backend_refresh_hz(&g_backend) > 0.0f)
                 ? (1000.0 / ((double)display_backend_refresh_hz(&g_backend) * 2.0)) : 0.0;
             double avg_tc_end_glass_mid_ms = avg_tc_end_disp_ms + half_scan_ms;
+            /* adc_disp_lat_us/tc_start_disp_lat_us/tc_end_disp_lat_us were
+             * exact duplicates of in_out_ms/tc_start_disp_ms/tc_end_disp_ms
+             * below in different units — dropped. adc_dec_lat_us (ingest to
+             * decode) and dec_disp_lat_us (decode to display) are NOT
+             * duplicates of anything else here and are kept. Also removed a
+             * genuinely unreachable middle branch that re-checked
+             * gpu_clock_x10>0 inside its own else (2026-08-02). gpu_mhz is
+             * appended only once the clock-reader thread has a first
+             * sample. */
             long gpu_clock_x10 = g_gpu_clock_mhz_x10;
+            printf("[MAIN] Frame %" PRIu64 ", TC: %s | rendered=%" PRIu64
+                   " skipped=%" PRIu64 " avg_render=%" PRIu64 "us ltc_fps=%.2f "
+                   "adc_dec_lat_us=%" PRIu64 " dec_disp_lat_us=%" PRIu64
+                   " in_out_ms=%.3f tc_end_disp_ms=%.3f tc_start_disp_ms=%.3f tc_end_glass_mid_ms=%.3f",
+                   frame_count, timecode_str, render_op_count, skip_count, avg_us, detected_ltc_fps,
+                   avg_ingest_to_decode_us, avg_decode_to_display_us,
+                   avg_in_out_ms, avg_tc_end_disp_ms, avg_tc_start_disp_ms, avg_tc_end_glass_mid_ms);
             if (gpu_clock_x10 > 0) {
-                double gpu_clock_mhz = (double)gpu_clock_x10 / 10.0;
-                printf("[MAIN] Frame %" PRIu64 ", TC: %s | rendered=%" PRIu64
-                       " skipped=%" PRIu64 " avg_render=%" PRIu64 "us ltc_fps=%.2f "
-                         "adc_dec_lat_us=%" PRIu64 " dec_disp_lat_us=%" PRIu64 " adc_disp_lat_us=%" PRIu64
-                       " tc_start_disp_lat_us=%" PRIu64 " tc_end_disp_lat_us=%" PRIu64
-                       " in_out_ms=%.3f tc_end_disp_ms=%.3f tc_start_disp_ms=%.3f tc_end_glass_mid_ms=%.3f"
-                       " gpu_mhz=%.1f"
-                       " rta_in_ovf=%" PRIu64 " rta_out_udf=%" PRIu64 "\n",
-                       frame_count, timecode_str, render_op_count, skip_count, avg_us, detected_ltc_fps,
-                         avg_ingest_to_decode_us, avg_decode_to_display_us, avg_ingest_to_display_us,
-                       avg_frame_start_to_display_us, avg_frame_end_to_display_us,
-                       avg_in_out_ms, avg_tc_end_disp_ms, avg_tc_start_disp_ms, avg_tc_end_glass_mid_ms,
-                       gpu_clock_mhz,
-                         g_rta_input_overflow, g_rta_output_underflow);
-            } else {
-                long gpu_clock_x10 = g_gpu_clock_mhz_x10;
-                if (gpu_clock_x10 > 0) {
-                    double gpu_clock_mhz = (double)gpu_clock_x10 / 10.0;
-                    printf("[MAIN] Frame %" PRIu64 ", TC: %s | rendered=%" PRIu64
-                           " skipped=%" PRIu64 " avg_render=%" PRIu64 "us ltc_fps=%.2f "
-                             "adc_dec_lat_us=%" PRIu64 " dec_disp_lat_us=%" PRIu64 " adc_disp_lat_us=%" PRIu64
-                           " tc_start_disp_lat_us=%" PRIu64 " tc_end_disp_lat_us=%" PRIu64
-                           " in_out_ms=%.3f tc_end_disp_ms=%.3f tc_start_disp_ms=%.3f tc_end_glass_mid_ms=%.3f"
-                           " gpu_mhz=%.1f"
-                           " rta_in_ovf=%" PRIu64 " rta_out_udf=%" PRIu64 "\n",
-                           frame_count, timecode_str, render_op_count, skip_count, avg_us, detected_ltc_fps,
-                             avg_ingest_to_decode_us, avg_decode_to_display_us, avg_ingest_to_display_us,
-                           avg_frame_start_to_display_us, avg_frame_end_to_display_us,
-                           avg_in_out_ms, avg_tc_end_disp_ms, avg_tc_start_disp_ms, avg_tc_end_glass_mid_ms,
-                           gpu_clock_mhz,
-                             g_rta_input_overflow, g_rta_output_underflow);
-                } else {
-                    printf("[MAIN] Frame %" PRIu64 ", TC: %s | rendered=%" PRIu64
-                           " skipped=%" PRIu64 " avg_render=%" PRIu64 "us ltc_fps=%.2f "
-                             "adc_dec_lat_us=%" PRIu64 " dec_disp_lat_us=%" PRIu64 " adc_disp_lat_us=%" PRIu64
-                           " tc_start_disp_lat_us=%" PRIu64 " tc_end_disp_lat_us=%" PRIu64
-                           " in_out_ms=%.3f tc_end_disp_ms=%.3f tc_start_disp_ms=%.3f tc_end_glass_mid_ms=%.3f"
-                           " rta_in_ovf=%" PRIu64 " rta_out_udf=%" PRIu64 "\n",
-                           frame_count, timecode_str, render_op_count, skip_count, avg_us, detected_ltc_fps,
-                             avg_ingest_to_decode_us, avg_decode_to_display_us, avg_ingest_to_display_us,
-                           avg_frame_start_to_display_us, avg_frame_end_to_display_us,
-                           avg_in_out_ms, avg_tc_end_disp_ms, avg_tc_start_disp_ms, avg_tc_end_glass_mid_ms,
-                             g_rta_input_overflow, g_rta_output_underflow);
-                }
+                printf(" gpu_mhz=%.1f", (double)gpu_clock_x10 / 10.0);
             }
+            printf(" rta_in_ovf=%" PRIu64 " rta_out_udf=%" PRIu64 "\n",
+                   g_rta_input_overflow, g_rta_output_underflow);
             fflush(stdout);
             render_op_count = 0;
             skip_count = 0;

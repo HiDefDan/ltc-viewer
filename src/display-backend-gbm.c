@@ -366,15 +366,28 @@ static void gbm_backend_draw_df_badge(ltc_gbm_output_t *out,
 }
 
 static int gbm_render_to_output(ltc_gbm_output_t *out, const gbm_render_state_t *state) {
-    static char prev_timecode[64] = {0};
     if (!out || !state || !out->font_atlas_tex || !out->prog) {
         return -1;
     }
 
-    if (state->timecode_str && state->timecode_str[0] &&
-        strcmp(prev_timecode, state->timecode_str) != 0) {
+    /* Logs on LAYOUT change (position/scale/orientation/color), not on
+     * every digit tick — the text changes ~25-30x/s while the layout
+     * itself is static, so logging on text change alone floods the
+     * journal for no diagnostic value. Tracked per-output (not a shared
+     * static) so a second active output with a different layout doesn't
+     * make both look like they're constantly changing. */
+    int layout_changed = !out->log_valid ||
+        state->text_x != out->log_text_x ||
+        state->text_y != out->log_text_y ||
+        state->logical_width != out->log_logical_w ||
+        state->logical_height != out->log_logical_h ||
+        state->target_text_color != out->log_color ||
+        state->portrait_mode != out->log_portrait ||
+        state->glyph_scale != out->log_glyph_scale;
+
+    if (g_log_verbose || layout_changed) {
         fprintf(stderr, "[GBM] render state: text='%s' color=0x%08X x=%u y=%u scale=%.2f portrait=%d logical=%ux%u\n",
-                state->timecode_str,
+                state->timecode_str ? state->timecode_str : "",
                 state->target_text_color,
                 state->text_x,
                 state->text_y,
@@ -383,8 +396,14 @@ static int gbm_render_to_output(ltc_gbm_output_t *out, const gbm_render_state_t 
                 state->logical_width,
                 state->logical_height);
         fflush(stderr);
-        strncpy(prev_timecode, state->timecode_str, sizeof(prev_timecode) - 1);
-        prev_timecode[sizeof(prev_timecode) - 1] = '\0';
+        out->log_text_x = state->text_x;
+        out->log_text_y = state->text_y;
+        out->log_logical_w = state->logical_width;
+        out->log_logical_h = state->logical_height;
+        out->log_color = state->target_text_color;
+        out->log_portrait = state->portrait_mode;
+        out->log_glyph_scale = state->glyph_scale;
+        out->log_valid = 1;
     }
 
     glViewport(0, 0, out->width, out->height);

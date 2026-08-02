@@ -3,6 +3,13 @@
 
 #include <stdint.h>
 
+/* Set from LTC_LOG_VERBOSE at startup (main.c). When 0 (default), the
+ * render loop and LTC decoder only log transitions (lock/unlock, gaps,
+ * layout changes) — not one line per rendered frame or decoded LTC frame,
+ * which at 25-60/s otherwise floods the journal. Set LTC_LOG_VERBOSE=1 to
+ * restore full per-frame logging for deep debugging. */
+extern int g_log_verbose;
+
 /* Hardware configuration */
 #define GPIO_LTC_PIN            17              /* BCM GPIO 17 for LTC input */
 #define TARGET_REFRESH_HZ       60              /* Waveshare 8.8" DSI panel max 60 Hz */

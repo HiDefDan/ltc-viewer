@@ -368,17 +368,23 @@ int ltc_get_frame(ltc_decoder_t *decoder, ltc_frame_t *frame) {
             }
         }
 
-        printf("[LTC-FRAME] #%" PRIu64 " seq=%s d=%d src=%s tc=%02u.%02u.%02u.%02u span=%ld fps=%.2f nfps=%u valid=%d streak=%u\n",
-               decoder->decoded_count,
-               seq_state,
-               seq_delta,
-               seq_src,
-               candidate.hours, candidate.minutes, candidate.seconds, candidate.frame,
-               (long)span,
-               decoder->detected_fps,
-               decoder->nominal_fps,
-               decoder->valid,
-               decoder->lock_streak);
+        /* Every OK-sequenced frame is the steady-state healthy case
+         * (~25-30/s while locked) — logging it unconditionally floods the
+         * journal for no diagnostic gain. Anomalies (GAP/DUP/BACK/NA)
+         * always log; the boring case only does under LTC_LOG_VERBOSE=1. */
+        if (g_log_verbose || strcmp(seq_state, "OK") != 0) {
+            printf("[LTC-FRAME] #%" PRIu64 " seq=%s d=%d src=%s tc=%02u.%02u.%02u.%02u span=%ld fps=%.2f nfps=%u valid=%d streak=%u\n",
+                   decoder->decoded_count,
+                   seq_state,
+                   seq_delta,
+                   seq_src,
+                   candidate.hours, candidate.minutes, candidate.seconds, candidate.frame,
+                   (long)span,
+                   decoder->detected_fps,
+                   decoder->nominal_fps,
+                   decoder->valid,
+                   decoder->lock_streak);
+        }
 
         if (decoder->valid) {
             if (!frame_pair_continuity_ok(&decoder->last_decoded, &candidate, decoder->nominal_fps)) {

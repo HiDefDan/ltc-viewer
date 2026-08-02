@@ -106,6 +106,14 @@ typedef struct {
     uint32_t glyph_spacing[LTC_GBM_GLYPH_COUNT];
     uint32_t atlas_digit_w; /* uniform digit cell width in the atlas, px */
     uint32_t atlas_cell_h;  /* uniform glyph cell height in the atlas, px */
+    /* Last-logged layout, for the "[GBM] render state" transition log in
+     * gbm_render_to_output — per-output (not a shared static) so multiple
+     * active outputs with different layouts don't make each other look
+     * like they're constantly changing. */
+    uint32_t log_text_x, log_text_y, log_logical_w, log_logical_h, log_color;
+    float log_glyph_scale;
+    int log_portrait;
+    int log_valid; /* 0 until the first line has been logged for this output */
 } ltc_gbm_output_t;
 
 /* A known HDMI-type connector, recorded at startup from every DRM device on
