@@ -16,8 +16,10 @@
      move. This zero-advance overlay is load-bearing for the string
      centering math in main.c. */
 
-#define FR_GLYPH_COUNT 11   /* [0..9] = digits, [10] = period */
+#define FR_GLYPH_COUNT 13   /* [0..9] = digits, [10] = period, [11] = 'd', [12] = 'F' */
 #define FR_PERIOD_INDEX 10
+#define FR_D_INDEX 11       /* lowercase 'd', for the "dF" rate-family indicator */
+#define FR_F_INDEX 12       /* uppercase 'F' */
 
 typedef struct {
     uint32_t cell_w;    /* bitmap width in px */

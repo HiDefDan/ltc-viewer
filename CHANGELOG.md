@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-08-02 (2)
+
+### Added
+- Always-visible rate/drop-frame indicator, bottom-right below the main readout: classified frame rate (`23.98`/`24`/`25`/`29.97`/`30`) right-justified against the boundary between the two `FF` digit cells, `dF` left-justified against that same boundary when set. Genuinely useful reference info for a professional LTC monitor (per the user, who works in live TV/gaming events), not debug clutter — the old ad-hoc dot-matrix debug overlay is untouched, this is a separate, always-on feature using the direct-font-rendering facility. Two new glyphs (`d`, `F`) added to the font atlas (`FR_GLYPH_COUNT` 11→13) since the atlas previously only held digits + period.
+- Rate is classified from the *measured* signal timing (`detected_ltc_fps`), not the decoder's snapped `nominal_fps` (24/25/30 only) — LTC's bitstream carries no field for the true frame rate, only the drop-frame bit, which is a frame-numbering *convention* completely independent of whether the real timing is 30.000 or 29.97 (30000/1001). `dF` is shown purely from that raw bit, decoupled from the classified rate entirely, so an unusual combination (e.g. `30`+`dF`) is surfaced honestly as a real anomaly rather than suppressed — matches how the user wants to use this as a field reference tool.
+- Vertical layout in `build_output_render_state()` now centers the *combined* block (main text + gap + rate row), not just the main text — the naive approach left no room below the main readout on this panel (`TIMECODE_FONT_HEIGHT` nearly fills the render height) and the row ran off the bottom edge; caught via an offline render before it ever reached the device.
+- Dim "88.88"/`dF` background behind the indicator, matching the main "88.88.88.88." treatment, always visible as a placeholder regardless of lock state.
+
+### Fixed
+- Confirm-streak hysteresis (added to stop the rate classification flickering between adjacent close candidates — 23.976/24 and 29.97/30 are ~0.1% apart) was advancing on every *render* tick (~60Hz) instead of once per genuinely new *decoded* LTC frame (~24-30fps) — the same measurement was counted toward the streak 2-3x before the next real frame arrived, diluting the confirm window to a fraction of its intended length. Now gated on `got_ltc`.
+- `dF` was gated on `ltc_live` (a strict 1-second freshness check) while the rate label and the main display's hold-last-frame behavior were gated on `display_ltc_active` (which persists longer during a brief loss) — `dF` was disappearing before the rest of the display on signal loss instead of all three locking together as one feature. All now gated on `display_ltc_active`.
+- A `GL_BLEND` state leak: the crossfade path's alpha-blended quads explicitly `glDisable(GL_BLEND)` after their own last quad, and the new rate/df drawing code (running immediately after, in the same frame) assumed blend was still enabled from the top of `gbm_render_to_output()` rather than managing its own state — on any frame that had just run a crossfade, this painted the row as a solid rectangle instead of shaped glyphs (confirmed via on-device photos: artifact confined exactly to the new row, only on crossfade frames, never the main text, since the main text is never drawn at all during an active crossfade — see the if/else in `gbm_render_to_output`). Fixed by explicitly re-enabling blend before the rate/df draws instead of assuming ambient state.
+
+### Known Issues
+- The `got_ltc` gating fix above reduces but does not eliminate transient misclassification on fresh acquisition: real-signal testing showed a genuine 30fps source still briefly displays `29.97` before settling, and a 23.976fps source briefly shows `25` *and* `24` before settling on `23.98`. The 23.976→25 excursion in particular is too large to be ordinary measurement noise near an adjacent candidate (25 isn't close to 23.976) — suspect the instantaneous fps measurement right after lock/APV-retune is based on a not-yet-converged span, a deeper issue than the confirm-streak alone can paper over. Flagged by the user as a priority follow-up ("triple-check hysteresis") — not yet root-caused or fixed.
+
+### Also Documented (system config, not app code)
+- DSI backlight default settled at 51/255 (20%, revised down from an initial 128/255 test value) in `/etc/sysfs.conf`. Fixed a boot-time race where `systemd-backlight@backlight:10-0045.service` clobbered the configured value with its last-saved state ~260µs after `sysfsutils.service` applied it, regardless of the configured value — masked that service instance since there's no legitimate "last brightness" to preserve on this appliance. See `PRODUCTION_IMAGE_GUIDE.md` §5e.
+
 ## 2026-08-01
 
 ### Added

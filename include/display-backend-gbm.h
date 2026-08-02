@@ -54,6 +54,22 @@ typedef struct {
     uint32_t overlay_color;
     float overlay_scale;
     int df_flag;
+    /* Always-visible rate/drop-frame indicator (distinct from the debug
+     * overlay above). rate_str holds the nominal rate ("24"/"25"/"30"/
+     * "29.97"); empty string hides it entirely (e.g. ToD fallback, no
+     * lock yet). Positions are pre-computed in build_output_render_state
+     * so the backend just draws — rate_x is already the right-justified
+     * draw origin, df_x the left-justified one, both anchored on the
+     * boundary between the two FF digit cells. */
+    char rate_str[12];
+    int show_df;
+    uint32_t rate_x, rate_y;
+    uint32_t df_x, df_y;
+    float rate_scale;
+    /* Fixed right-justified position for the dim "88.88" background,
+     * independent of the current rate_str's length (see the comment at its
+     * computation site in main.c). df's background reuses df_x directly. */
+    uint32_t bg_rate_x;
 } gbm_render_state_t;
 
 /* One GBM device / EGL display per physical DRM device (/dev/dri/cardN)
@@ -66,7 +82,7 @@ typedef struct {
     EGLConfig egl_config;
 } ltc_gbm_device_t;
 
-#define LTC_GBM_GLYPH_COUNT 11 /* digits 0-9 + period */
+#define LTC_GBM_GLYPH_COUNT 13 /* digits 0-9, period, 'd', 'F' (rate/df indicator) */
 
 /* Per-connector scanout state. Output 0 is always the primary/permanent
  * display (DSI, or HDMI if no DSI is present). Outputs 1..N are HDMI

@@ -547,6 +547,39 @@ static inline void timecode_fade_alphas(uint64_t elapsed_ns, uint64_t duration_n
  * across every output and is passed in as-is; only geometry is recomputed
  * per output, since DSI (portrait) and HDMI (landscape) need independently
  * scaled/positioned layouts from the same logical content. */
+/* Rate indicator classification. LTC's bitstream carries no field for the
+ * true frame rate — only the measured signal timing (detected_fps) can
+ * distinguish 29.97 from true 30, or 23.976 from true 24. The drop_frame
+ * bit is a fully independent piece of encoded metadata (a frame-numbering
+ * convention only) and is displayed as its own "dF" indicator regardless of
+ * which rate is classified — an unusual combination (e.g. "30"+dF) is a
+ * real anomaly a reference tool should show plainly, not suppress. 23.976
+ * displays as "23.98" (cosmetic choice). */
+static const float RATE_CANDIDATES[] = {23.976f, 24.0f, 25.0f, 29.97f, 30.0f};
+static const char *RATE_LABELS[] = {"23.98", "24", "25", "29.97", "30"};
+#define RATE_CANDIDATE_COUNT 5
+
+/* 23.976/24 and 29.97/30 are only ~0.1% apart — close enough that ordinary
+ * measurement jitter can straddle the boundary. A prior (different)
+ * implementation of this exact feature flickered under this condition and
+ * was mistaken by viewers for an LTC error rather than a software bug, so
+ * the displayed classification only changes after this many consecutive
+ * frames agree — same debounce pattern as ltc.c's lock_streak. */
+#define RATE_STREAK_CONFIRM 5
+
+static int nearest_rate_index(float fps) {
+    int best = 0;
+    float best_diff = fabsf(fps - RATE_CANDIDATES[0]);
+    for (int i = 1; i < RATE_CANDIDATE_COUNT; i++) {
+        float diff = fabsf(fps - RATE_CANDIDATES[i]);
+        if (diff < best_diff) {
+            best_diff = diff;
+            best = i;
+        }
+    }
+    return best;
+}
+
 static void build_output_render_state(gbm_render_state_t *out_state,
                                       uint32_t fb_width, uint32_t fb_height,
                                       uint32_t digit_w, uint32_t glyph_h,
@@ -560,7 +593,8 @@ static void build_output_render_state(gbm_render_state_t *out_state,
                                       int debug_overlay_enabled,
                                       const char *overlay_str,
                                       uint32_t overlay_color,
-                                      int df_flag)
+                                      int df_flag,
+                                      const char *rate_label)
 {
     int portrait_mode = (fb_height > fb_width);
     uint32_t render_width = portrait_mode ? fb_height : fb_width;
@@ -587,11 +621,29 @@ static void build_output_render_state(gbm_render_state_t *out_state,
     }
 
     uint32_t scaled_glyph_height = (uint32_t)(glyph_h * glyph_scale + 0.5f);
-    int32_t center_y = (render_height > scaled_glyph_height) ?
-                       (int32_t)((render_height - scaled_glyph_height) / 2) : 0;
+
+    /* Rate/df row height is reserved unconditionally (even when currently
+     * hidden — no lock, or ToD fallback) so the main timecode doesn't jump
+     * vertically as LTC lock comes and goes. Computed here, ahead of the
+     * main text's vertical centering, so the *combined* block (main text +
+     * gap + rate row) is what's centered in the available height — the
+     * naive approach of centering only the main text left no room below it
+     * for the rate row on displays where TIMECODE_FONT_HEIGHT nearly fills
+     * the render height (confirmed by an offline render: the row ran off
+     * the bottom edge entirely). */
+    float rate_scale = glyph_scale * 0.35f;
+    if (rate_scale < 0.10f) {
+        rate_scale = 0.10f;
+    }
+    uint32_t rate_cell_h = (uint32_t)(glyph_h * rate_scale + 0.5f);
+    uint32_t rate_gap = (uint32_t)(scaled_glyph_height * 0.06f + 0.5f);
+    uint32_t combined_height = scaled_glyph_height + rate_gap + rate_cell_h;
+
+    int32_t center_y = (render_height > combined_height) ?
+                       (int32_t)((render_height - combined_height) / 2) : 0;
     int32_t text_y_final = center_y + y_offset;
     int32_t min_text_y = 0;
-    int32_t max_text_y = (int32_t)render_height - (int32_t)scaled_glyph_height;
+    int32_t max_text_y = (int32_t)render_height - (int32_t)combined_height;
     if (max_text_y < 0) {
         max_text_y = 0;
     }
@@ -647,6 +699,45 @@ static void build_output_render_state(gbm_render_state_t *out_state,
         overlay_scale = 0.08f;
     }
 
+    /* Rate/df indicator: anchored on the boundary between the two FF digit
+     * cells (7 digit-widths in from the string start), rate right-justified
+     * against that boundary and "dF" left-justified against it, so they sit
+     * symmetrically under the frame-count pair. rate_scale/rate_cell_h were
+     * already computed above (needed for the vertical centering reservation
+     * before text_y_final existed) — reused here, not recomputed. */
+    const char *rate_str = rate_label ? rate_label : "";
+    int show_df = df_flag ? 1 : 0;
+
+    uint32_t rate_digit_w = (uint32_t)(digit_w * rate_scale + 0.5f);
+    if (rate_digit_w == 0) {
+        rate_digit_w = 1;
+    }
+
+    uint32_t ff_boundary_x = (uint32_t)text_x_final + 7u * scaled_digit_width;
+    uint32_t rate_chars = 0;
+    for (const char *p = rate_str; *p; p++) {
+        if (*p != '.') {
+            rate_chars++;
+        }
+    }
+    uint32_t rate_width = rate_chars * rate_digit_w;
+    uint32_t rate_x = (ff_boundary_x > rate_width) ? (ff_boundary_x - rate_width) : 0;
+    uint32_t df_x = ff_boundary_x;
+
+    /* Dim "88.88"-style background for the rate/df row, matching the main
+     * readout's always-visible unlit-segment treatment (§ user request).
+     * Fixed at the widest real case (4 digit-cells: "29.97"/"23.98") and
+     * right-justified at the same boundary regardless of the CURRENT
+     * rate_str's length, so it reads as a stable placeholder rather than
+     * resizing as the classification changes. df's background reuses df_x
+     * directly since "dF" is always exactly 2 characters. */
+    uint32_t bg_rate_x = (ff_boundary_x > 4u * rate_digit_w) ? (ff_boundary_x - 4u * rate_digit_w) : 0;
+
+    /* Space for this row was already reserved in the vertical centering
+     * above (combined_height), so this always fits within render_height —
+     * no runtime clamp needed here. */
+    uint32_t rate_y = (uint32_t)text_y_final + scaled_glyph_height + rate_gap;
+
     memset(out_state, 0, sizeof(*out_state));
     out_state->portrait_mode = portrait_mode;
     out_state->fb_width = fb_width;
@@ -670,6 +761,14 @@ static void build_output_render_state(gbm_render_state_t *out_state,
     out_state->overlay_color = overlay_color;
     out_state->overlay_scale = overlay_scale;
     out_state->df_flag = df_flag;
+    snprintf(out_state->rate_str, sizeof(out_state->rate_str), "%s", rate_str);
+    out_state->show_df = show_df;
+    out_state->rate_x = rate_x;
+    out_state->rate_y = rate_y;
+    out_state->df_x = df_x;
+    out_state->df_y = rate_y;
+    out_state->rate_scale = rate_scale;
+    out_state->bg_rate_x = bg_rate_x;
 }
 
 int main(int argc, char *argv[]) {
@@ -1365,7 +1464,57 @@ int main(int argc, char *argv[]) {
                 ((uint32_t)text_x_final - scaled_digit_width) : 0;
 
             char overlay_str[32] = {0};
-            unsigned int df_flag = (ltc_live && last_ltc_frame.drop_frame) ? 1u : 0u;
+            /* df is gated on display_ltc_active (same signal driving the
+             * rate classification below and the main text's hold-last-frame
+             * behavior), not the stricter ltc_live 1s-freshness check —
+             * they need to lock together as one feature. Gating df on
+             * ltc_live alone made it drop out of sight before the rate label
+             * or the held timecode did on signal loss. */
+            unsigned int df_flag = (display_ltc_active && last_ltc_frame.drop_frame) ? 1u : 0u;
+
+            /* Rate classification: computed once per frame (not per output
+             * — an active second display must not double-advance the
+             * confirm streak), and the confirm-streak only ADVANCES on a
+             * genuinely new decoded LTC frame (got_ltc), not on every render
+             * tick. The render loop ticks at display refresh (~60Hz), well
+             * above the LTC decode rate (~24-30fps) — advancing on every
+             * tick let the same decoded measurement get counted toward the
+             * streak 2-3x before the next real frame arrived, diluting the
+             * hysteresis window to a fraction of its intended length and
+             * letting a transient reading (e.g. "29.97" while a genuine 30
+             * signal's rate estimate is still converging) get confirmed and
+             * displayed before the correct one. Hysteresis state resets when
+             * LTC isn't currently being displayed, so a freshly (re)acquired
+             * signal always re-confirms from scratch rather than carrying
+             * over a stale streak from whatever was previously locked. */
+            static int rate_pending_idx = -1;
+            static int rate_streak = 0;
+            static int rate_displayed_idx = -1;
+            const char *rate_label = "";
+            if (display_ltc_active) {
+                if (got_ltc) {
+                    int candidate_idx = nearest_rate_index(detected_ltc_fps);
+                    if (candidate_idx == rate_pending_idx) {
+                        if (rate_streak < RATE_STREAK_CONFIRM) {
+                            rate_streak++;
+                        }
+                    } else {
+                        rate_pending_idx = candidate_idx;
+                        rate_streak = 1;
+                    }
+                    if (rate_streak >= RATE_STREAK_CONFIRM) {
+                        rate_displayed_idx = rate_pending_idx;
+                    }
+                }
+                if (rate_displayed_idx >= 0) {
+                    rate_label = RATE_LABELS[rate_displayed_idx];
+                }
+            } else {
+                rate_pending_idx = -1;
+                rate_streak = 0;
+                rate_displayed_idx = -1;
+            }
+
             float overlay_scale = glyph_scale * 0.23f;
             if (overlay_scale < 0.08f) {
                 overlay_scale = 0.08f;
@@ -1447,7 +1596,8 @@ int main(int argc, char *argv[]) {
                                                fade_from_str, from_color,
                                                fade_to_str, to_color,
                                                current_config.debug_overlay_enabled,
-                                               overlay_str, overlay_color, (int)df_flag);
+                                               overlay_str, overlay_color, (int)df_flag,
+                                               rate_label);
 
                     int render_rc = display_backend_render_output(&g_backend, out_idx, &gbm_state);
 

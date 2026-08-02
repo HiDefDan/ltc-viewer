@@ -289,6 +289,34 @@ exactly what recovered this incident (the boot partition of the clone target sti
 had the untouched original `kernel8_rt.img`). Keep clone backups current,
 especially right before any `apt upgrade`.
 
+## 5e. DSI Backlight Default and a systemd Race
+
+Default brightness is **51/255 (20%)**, set in `/etc/sysfs.conf`:
+
+```
+class/backlight/10-0045/brightness = 51
+```
+
+This used to silently fail regardless of the configured value:
+`systemd-backlight@backlight:10-0045.service` (systemd's built-in save/restore-
+last-brightness mechanism) finishes ~260µs *after* `sysfsutils.service` at every
+boot and clobbers whatever `sysfs.conf` just set with its own saved state. There's
+no legitimate "last brightness the user set" to preserve on this appliance — nothing
+adjusts it at runtime — so the fix is to remove the competing writer entirely
+rather than just change which one wins:
+
+```bash
+sudo systemctl mask systemd-backlight@backlight:10-0045.service
+```
+
+Verify after any reboot: `cat /sys/class/backlight/10-0045/brightness` should read
+`51`, not `255`.
+
+User-adjustable brightness (via the web config UI) is a planned future feature, not
+yet built. If that lands, reconsider whether `systemd-backlight` should be unmasked
+(to persist a user-set value across reboots) or left masked with `sysfs.conf` only
+governing the boot-time default while the UI adjusts live at runtime.
+
 ## 6. HiFiBerry LTC Input Routing
 
 Detected card is expected to be card 2 (`sndrpihifiberry`).

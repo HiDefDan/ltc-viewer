@@ -175,6 +175,27 @@ int font_render_rasterize_set(fr_glyph_set_t *set, uint32_t pixel_height) {
     }
     set->glyphs[FR_PERIOD_INDEX].advance = 0;
 
+    /* 'd'/'F' for the rate-family indicator ("dF" — 29.97 drop-frame vs 30
+       non-drop). Composed the same way as digits: monospace cell, pen at
+       cell origin, advance = digit_cell_w. Any letter wider than a digit
+       cell simply clips at the cell edge (compose_glyph's existing bounds
+       check) rather than corrupting adjacent cells. */
+    int dg = stbtt_FindGlyphIndex(&g_font, 'd');
+    if (compose_glyph(&set->glyphs[FR_D_INDEX], dg, scale,
+                      digit_cell_w, pixel_height, 0) != 0) {
+        font_render_free_set(set);
+        return -1;
+    }
+    set->glyphs[FR_D_INDEX].advance = digit_cell_w;
+
+    int fg = stbtt_FindGlyphIndex(&g_font, 'F');
+    if (compose_glyph(&set->glyphs[FR_F_INDEX], fg, scale,
+                      digit_cell_w, pixel_height, 0) != 0) {
+        font_render_free_set(set);
+        return -1;
+    }
+    set->glyphs[FR_F_INDEX].advance = digit_cell_w;
+
     return 0;
 }
 

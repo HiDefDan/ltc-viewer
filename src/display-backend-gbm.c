@@ -180,7 +180,13 @@ static int glyph_index(char ch) {
         return ch - '0';
     }
     if (ch == '.') {
-        return 10;
+        return FR_PERIOD_INDEX;
+    }
+    if (ch == 'd') {
+        return FR_D_INDEX;
+    }
+    if (ch == 'F') {
+        return FR_F_INDEX;
     }
     return -1;
 }
@@ -457,6 +463,66 @@ static int gbm_render_to_output(ltc_gbm_output_t *out, const gbm_render_state_t 
                              state->text_x,
                              state->text_y,
                              state->glyph_scale,
+                             state->target_text_color,
+                             0,
+                             state->portrait_mode,
+                             state->logical_width,
+                             state->logical_height);
+    }
+
+    // Rate/drop-frame indicator — dim unlit-style background always drawn
+    // (same treatment/color as the main "88.88.88.88." background, static
+    // reference regardless of lock state), real values drawn on top only
+    // when currently classified/set. Positions pre-computed by
+    // build_output_render_state.
+    //
+    // GL_BLEND is explicitly re-enabled here rather than assumed on from
+    // the top of this function: the crossfade path above (use_alpha=1
+    // quads) explicitly glDisable(GL_BLEND) after its own last quad, so on
+    // any frame that just ran a crossfade, blend would otherwise be off by
+    // the time this code runs. Without blending, the shader has nothing to
+    // mask the unlit segments with, so the whole quad paints solid instead
+    // of the glyph shape — confirmed via photos: the artifact was confined
+    // exactly to this row, only on crossfade frames, never the main text
+    // (which is never drawn on a crossfade frame at all — see the if/else
+    // above — so it was never exposed to the same state leak).
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    gbm_backend_draw_text(out, "88.88",
+                         (float)state->bg_rate_x,
+                         (float)state->rate_y,
+                         state->rate_scale,
+                         0xFF0A0A0A,
+                         0,
+                         state->portrait_mode,
+                         state->logical_width,
+                         state->logical_height);
+    gbm_backend_draw_text(out, "dF",
+                         (float)state->df_x,
+                         (float)state->df_y,
+                         state->rate_scale,
+                         0xFF0A0A0A,
+                         0,
+                         state->portrait_mode,
+                         state->logical_width,
+                         state->logical_height);
+
+    if (state->rate_str[0] != '\0') {
+        gbm_backend_draw_text(out, state->rate_str,
+                             (float)state->rate_x,
+                             (float)state->rate_y,
+                             state->rate_scale,
+                             state->target_text_color,
+                             0,
+                             state->portrait_mode,
+                             state->logical_width,
+                             state->logical_height);
+    }
+    if (state->show_df) {
+        gbm_backend_draw_text(out, "dF",
+                             (float)state->df_x,
+                             (float)state->df_y,
+                             state->rate_scale,
                              state->target_text_color,
                              0,
                              state->portrait_mode,
