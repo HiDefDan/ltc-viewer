@@ -22,7 +22,6 @@ typedef struct {
     uint32_t bit_phase;             /* phase counter for bit extraction */
     uint32_t bit_buffer;            /* 80-bit shift register */
     uint32_t bit_count;             /* bits received in current frame */
-    uint32_t last_edge_time_us;     /* last GPIO edge timestamp (µs) */
     ltc_frame_t pending_decoded;
     ltc_frame_t last_decoded;
     uint32_t frame_rate;            /* 24/25/30 fps */
@@ -49,9 +48,6 @@ int ltc_decoder_init(ltc_decoder_t *decoder, uint32_t frame_rate);
    count: number of samples. */
 int ltc_feed_audio(ltc_decoder_t *decoder, const int16_t *samples,
                    uint32_t count, int channels);
-
-/* Feed GPIO edge (deprecated, ALSA ingest is preferred) */
-int ltc_feed_edge(ltc_decoder_t *decoder, uint64_t edge_time_us, int level);
 
 /* Get last valid decoded frame */
 int ltc_get_frame(ltc_decoder_t *decoder, ltc_frame_t *frame);

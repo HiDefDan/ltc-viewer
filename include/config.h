@@ -11,7 +11,6 @@
 extern int g_log_verbose;
 
 /* Hardware configuration */
-#define GPIO_LTC_PIN            17              /* BCM GPIO 17 for LTC input */
 #define TARGET_REFRESH_HZ       60              /* Waveshare 8.8" DSI panel max 60 Hz */
 #define DISPLAY_WIDTH           1920            /* Landscape after cmdline rotate=90 */
 #define DISPLAY_HEIGHT          480             /* Waveshare 8.8" DSI: 480x1920 native, rotated 90° */

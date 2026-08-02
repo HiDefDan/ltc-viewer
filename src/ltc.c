@@ -473,15 +473,6 @@ uint64_t ltc_get_gap_count(const ltc_decoder_t *decoder) {
     return decoder->gap_count;
 }
 
-/* Stub: GPIO edge decoder (deprecated, use ltc_feed_audio for ALSA ingest) */
-int ltc_feed_edge(ltc_decoder_t *decoder, uint64_t edge_time_us, int level) {
-    (void)decoder;
-    (void)edge_time_us;
-    (void)level;
-    /* No-op: ALSA ingest path supersedes GPIO edge capture */
-    return 0;
-}
-
 /* Cleanup decoder resources */
 void ltc_decoder_cleanup(ltc_decoder_t *decoder) {
     if (decoder && decoder->libltc) {
