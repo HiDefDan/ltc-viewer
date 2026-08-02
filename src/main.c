@@ -23,6 +23,50 @@
 #include "config-watcher.h"
 
 static volatile int should_exit = 0;
+
+/* Shutdown hard-exit backstop (spawned at the top of main()'s shutdown
+ * path, before any teardown call runs). Root-caused 2026-08-02 via
+ * checkpoint logging: a full `poweroff`/`halt` reliably hangs the entire
+ * machine — not just this process — inside rtaudio_abort_stream() the
+ * instant it's called, most likely kernel-level ALSA lock contention with
+ * alsa-restore.service, which only runs concurrently during a real
+ * multi-service shutdown (never during a standalone `systemctl stop`,
+ * which is why that path "works", just slowly). Earlier suspects (a GBM/
+ * EGL DRM wait, an RT-priority/RCU-isolation interaction) were both ruled
+ * out by the same logging — the process never got past the very first
+ * teardown call. SIGKILL cannot unstick an in-kernel wait, so an
+ * unguarded hang here holds the process open past TimeoutStopSec until
+ * the Pi's hardware watchdog (armed by RPi OS's stock
+ * 40-rpi-enable-watchdog.conf, independent of anything in this codebase)
+ * fires a hard SoC reset — which looks exactly like an unwanted reboot on
+ * `halt`/`poweroff`, because the reset happens before the kernel ever
+ * reaches the actual power-off instruction. Bounding the *whole* teardown
+ * sequence (not just the step known to hang today) means any future stuck
+ * call is caught the same way. */
+static volatile int g_shutdown_done = 0;
+
+/* Diagnostic checkpoint logging for the shutdown path (2026-08-02
+ * investigation): pins down exactly which call the process is in when a
+ * full-system poweroff stalls, since "before this line" vs "after it"
+ * is otherwise invisible in the journal. Remove once shutdown is solid. */
+static void log_shutdown_checkpoint(const char *label) {
+    struct timespec ts;
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    fprintf(stderr, "[SHUTDOWN-CKPT] %s (boot+%.3f s)\n", label, ts.tv_sec + ts.tv_nsec / 1e9);
+    fflush(stderr);
+}
+
+static void *shutdown_watchdog_thread(void *arg) {
+    (void)arg;
+    struct timespec ts = { 3, 0 }; /* generous vs. the ~0.1-0.2s this normally takes end-to-end */
+    nanosleep(&ts, NULL);
+    if (!g_shutdown_done) {
+        fprintf(stderr, "[MAIN] Shutdown did not complete within 3s (stuck teardown call) — forcing exit\n");
+        fflush(stderr);
+        _exit(0);
+    }
+    return NULL;
+}
 static display_backend_t g_backend;
 static volatile uint64_t g_rta_input_overflow = 0;
 static volatile uint64_t g_rta_output_underflow = 0;
@@ -452,6 +496,16 @@ static ltc_frame_t tc_add_steps(const ltc_frame_t *f, uint32_t fps, uint32_t ste
 
 void signal_handler(int sig) {
     (void)sig;
+    /* Diagnostic: proves the signal was actually delivered/handled (vs.
+     * the render loop already being stuck in an uninterruptible call at
+     * delivery time) and pins the exact wall-clock moment, independent of
+     * whatever the main thread is doing. write() is async-signal-safe;
+     * printf/fprintf are not, so this can't use the logging used elsewhere
+     * in this file. Diagnostic only — not the shutdown-stall fix itself. */
+    static const char msg[] = "[MAIN] signal handler entered\n";
+    ssize_t unused_rc = write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    (void)unused_rc;
+
     /* Second signal = the graceful path is stuck (or starved by a runaway
      * RT thread) — bail out hard so the process is always killable from
      * the keyboard. DRM keeps scanning out the last frame regardless. */
@@ -1877,6 +1931,61 @@ int main(int argc, char *argv[]) {
 
     printf("[MAIN] Shutting down...\n");
 
+    /* Hard backstop for the ENTIRE shutdown sequence below, spawned before
+     * any teardown call runs — see the comment on g_shutdown_done for the
+     * root cause this guards against (rtaudio_abort_stream() hanging the
+     * whole machine during a real poweroff). g_shutdown_done is set at the
+     * very end, right before the final "Cleanup complete" print. */
+    {
+        pthread_t shutdown_wd_tid;
+        if (pthread_create(&shutdown_wd_tid, NULL, shutdown_watchdog_thread, NULL) == 0) {
+            pthread_detach(shutdown_wd_tid);
+        }
+    }
+
+    /* Also drop out of SCHED_FIFO / CPU-3 pinning early: harmless and
+     * arguably good hygiene (lets the kernel schedule this thread freely
+     * once it's no longer doing latency-sensitive work), even though
+     * checkpoint logging on 2026-08-02 showed this was NOT the cause of
+     * the shutdown hang — the process was already stuck in
+     * rtaudio_abort_stream() before this point, so an RT/RCU-isolation
+     * theory considered earlier is ruled out. Kept for the modest
+     * scheduling-hygiene benefit, not as a fix. */
+    log_shutdown_checkpoint("loop exited, entering shutdown");
+
+    /* Deliberately NOT calling rtaudio_abort_stream/close_stream/destroy
+     * here. Checkpoint logging on 2026-08-02 caught this process hanging
+     * inside rtaudio_abort_stream() on every single full-`poweroff`
+     * attempt, and the 3s shutdown-watchdog backstop above never managed
+     * to fire either — meaning the hang is a genuine uninterruptible
+     * kernel wait (ALSA driver lock contention with alsa-restore.service,
+     * which only runs concurrently during a real multi-service shutdown,
+     * never during a standalone `systemctl stop`), not something any
+     * signal — SIGKILL from systemd or our own _exit() from another
+     * thread — can force through. A thread parked in D-state doesn't
+     * respond to _exit()'s exit_group() any more than it responds to
+     * SIGKILL. The only reliable fix is to not enter that call at all:
+     * skip the graceful ALSA stream teardown and let process exit close
+     * the underlying fd. rtactx.rta is intentionally leaked here — the
+     * process is terminating regardless. */
+    if (g_gpu_clock_thread_running) {
+        log_shutdown_checkpoint("gpu_clock_thread join: start");
+        g_gpu_clock_thread_running = 0;
+        pthread_join(g_gpu_clock_thread, NULL);
+        log_shutdown_checkpoint("gpu_clock_thread join: done");
+    }
+    {
+        struct sched_param revert_param = {0};
+        sched_setscheduler(0, SCHED_OTHER, &revert_param);
+        cpu_set_t all_cpus;
+        CPU_ZERO(&all_cpus);
+        for (int c = 0; c < CPU_SETSIZE; c++) {
+            CPU_SET(c, &all_cpus);
+        }
+        sched_setaffinity(0, sizeof(all_cpus), &all_cpus);
+    }
+    log_shutdown_checkpoint("RT priority/affinity dropped");
+
     /* Blank every active output before tearing down. DRM keeps scanning out
      * whatever framebuffer was last flipped even after this process exits,
      * so on a graceful shutdown (SIGTERM/SIGINT — systemd gives us
@@ -1893,32 +2002,33 @@ int main(int argc, char *argv[]) {
             if (!display_backend_output_active(&g_backend, i)) {
                 continue;
             }
+            char ckpt_label[64];
+            snprintf(ckpt_label, sizeof(ckpt_label), "output %d render_output: start", i);
+            log_shutdown_checkpoint(ckpt_label);
             display_backend_render_output(&g_backend, i, &blank_state);
+            snprintf(ckpt_label, sizeof(ckpt_label), "output %d render_output: done, flip_sync: start", i);
+            log_shutdown_checkpoint(ckpt_label);
             /* Synchronous present: the blank frame must be on scanout
              * before this process exits, not queued behind a vblank event
              * nobody will be alive to collect. */
             display_backend_flip_output_sync(&g_backend, i);
+            snprintf(ckpt_label, sizeof(ckpt_label), "output %d flip_sync: done", i);
+            log_shutdown_checkpoint(ckpt_label);
         }
     }
+    log_shutdown_checkpoint("blanking loop done, entering final cleanup");
 
-    /* Cleanup */
-    if (rtactx.rta) {
-        if (rtaudio_is_stream_running(rtactx.rta))
-            rtaudio_abort_stream(rtactx.rta);
-        if (rtaudio_is_stream_open(rtactx.rta))
-            rtaudio_close_stream(rtactx.rta);
-        rtaudio_destroy(rtactx.rta);
-    }
-    if (g_gpu_clock_thread_running) {
-        g_gpu_clock_thread_running = 0;
-        pthread_join(g_gpu_clock_thread, NULL);
-    }
+    /* Cleanup (RtAudio stream and GPU clock thread already stopped above,
+     * ahead of the display teardown — see the comment there). */
     pthread_mutex_destroy(&ltc_mutex);
     ltc_decoder_cleanup(&ltc);
     free(static_layer_buffer);
     config_watcher_cleanup(&config_watcher);
+    log_shutdown_checkpoint("display_backend_cleanup: start");
     display_backend_cleanup(&g_backend);
+    log_shutdown_checkpoint("display_backend_cleanup: done");
 
+    g_shutdown_done = 1;
     printf("[MAIN] Cleanup complete. Exiting.\n");
     return EXIT_SUCCESS;
 }

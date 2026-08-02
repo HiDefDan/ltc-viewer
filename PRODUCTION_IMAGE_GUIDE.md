@@ -163,26 +163,46 @@ Expected: no active swap devices, and no `dev-zram0.swap` in the `critical-chain
 
 ## 5b. Halt/Poweroff Behavior (Watchdog Reboot Fix)
 
-Symptom: `sudo halt` (or a shutdown that stalls) reboots the unit instead of
-stopping it.
+Symptom: `sudo halt` / `sudo poweroff` reboots the unit instead of stopping
+it.
 
-Cause: Raspberry Pi OS enables the BCM2835 hardware watchdog via
-`/usr/lib/systemd/system.conf.d/40-rpi-enable-watchdog.conf`
-(`RuntimeWatchdogSec=1m`, `RebootWatchdogSec=2m`), and the bootloader
-EEPROM default `POWER_OFF_ON_HALT=0` means `halt` leaves the SoC powered in
-a spin loop. Nothing feeds the armed watchdog in that state, so it fires
-(≤60 s) and resets the SoC — a halt becomes a reboot. This is unrelated to
-the application's shutdown display blanking, which runs inside the
-service's `TimeoutStopSec=5` window and is SIGKILL-bounded.
+Two independent causes were found (2026-08-02), both must be fixed:
 
-Fix — make halt actually cut power (keeps the runtime watchdog's hang
-protection, which a field appliance wants):
+**1. ALSA lock contention during shutdown (the actual hang).** Checkpoint
+logging in `ltc-timecode`'s shutdown path showed the process reliably
+freezing inside `rtaudio_abort_stream()` (stopping the HiFiBerry capture
+stream) on every real `poweroff`/`halt` — but never during a standalone
+`systemctl stop ltc-timecode`. The difference: `alsa-restore.service`'s
+`ExecStop` (`alsactl store`, which opens every ALSA control device
+including the HiFiBerry to save mixer state) only runs concurrently during
+a full multi-service shutdown. The result is a genuine uninterruptible
+kernel-level ALSA driver lock wait — not something SIGKILL, or any signal
+sent from within `ltc-timecode` itself, can unstick — so the whole machine
+stalls until the BCM2835 hardware watchdog
+(`/usr/lib/systemd/system.conf.d/40-rpi-enable-watchdog.conf`,
+`RuntimeWatchdogSec=1m`) forces a hard SoC reset. Fixed in the app (skips
+the graceful ALSA stream teardown at shutdown entirely — the fd closes
+with the process regardless) and by removing the concurrent contention:
+
+```bash
+sudo systemctl mask alsa-restore.service
+```
+
+Not needed for this appliance (a fixed-config capture-only card has no
+mixer state worth persisting across reboots), and removes the race
+outright rather than hoping the two threads never collide again.
+
+**2. EEPROM power sequencing.** Once shutdown completes cleanly, the
+bootloader EEPROM default `POWER_OFF_ON_HALT=0` still leaves the SoC
+powered in a spin loop after `halt` — with nothing feeding the (now
+correctly disarmed-on-clean-shutdown) watchdog, but also nothing actually
+cutting power, so the board can appear to hang or drift into an
+inconsistent state. Fix:
 
 ```bash
 sudo rpi-eeprom-config --edit   # add: POWER_OFF_ON_HALT=1
 ```
 
-Then use `sudo poweroff` (or `sudo halt`, now equivalent) to stop units.
 Validate: after `sudo poweroff`, the power LED goes out and the unit stays
 down until power-cycled.
 
