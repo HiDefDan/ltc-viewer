@@ -242,6 +242,53 @@ sudo rm /etc/systemd/journald.conf.d/50-persistent-storage.conf
 sudo systemctl restart systemd-journald
 ```
 
+## 5d. Custom RT Kernel Deployment & Update Safety
+
+This appliance boots a manually-built kernel — `/boot/firmware/kernel8_rt.img`,
+currently `6.12.87-v8-rt+` — not the Raspberry Pi OS stock package. `dpkg` has no
+idea: it still associates that filename with whatever stock
+`linux-image-*-rpi-v8-rt` package happens to be installed alongside it.
+
+**`apt-mark hold` on the kernel package is NOT sufficient to protect it**, learned
+the hard way on 2026-08-02. `raspi-firmware`'s kernel-image copy hook
+(`/etc/kernel/postinst.d/z50-raspi-firmware`) fires on *any* `update-initramfs` run
+for a flavor, not only when that flavor's own package is reinstalled — an unrelated
+package upgrade that happens to trigger an initramfs rebuild is enough to make the
+hook recopy whatever it thinks is the "latest" `-rpi-v8-rt` vmlinuz over
+`kernel8_rt.img`, silently, with no warning, entirely independent of any package
+hold. This is exactly what happened during a routine `apt upgrade` that held the
+kernel packages correctly — the hold prevented a *reinstall* but did nothing about
+the *retrigger*.
+
+**The actual fix:** disable the whole auto-copy mechanism for every flavor, so
+nothing ever touches `/boot/firmware/kernel*.img` without a deliberate manual step:
+
+```bash
+sudo sed -i 's/^#KERNEL=auto/KERNEL=custom/' /etc/default/raspi-firmware
+```
+
+(Any value other than exactly `auto` works — the postinst script gates its entire
+copy block on `[ "$KERNEL" = "auto" ]`.) Verify with:
+```bash
+grep '^KERNEL=' /etc/default/raspi-firmware
+```
+
+**Deploying a new custom kernel build from here on requires a manual copy step**,
+by design:
+```bash
+sudo cp -p <new-vmlinuz> /boot/firmware/kernel8_rt.img
+```
+
+**If this is ever hit again despite the fix:** the preserved build artifacts —
+`~/kconfig/` (exact `.config`, hardware `.dtb`, module manifest) and
+`~/time-bandit_kernel_update.tar.gz` (matching module tree + boot overlays) — do
+**not** include the compiled kernel Image/vmlinuz binary itself, only modules and
+config. The only real recovery path if the boot image itself is corrupted is a
+**recent full-disk backup** (`rpi-clone`) taken before the corruption — which is
+exactly what recovered this incident (the boot partition of the clone target still
+had the untouched original `kernel8_rt.img`). Keep clone backups current,
+especially right before any `apt upgrade`.
+
 ## 6. HiFiBerry LTC Input Routing
 
 Detected card is expected to be card 2 (`sndrpihifiberry`).
