@@ -18,6 +18,7 @@
 #include "display-backend.h"
 #include "font.h"
 #include "ltc-timecode.h"
+#include "aes67.h"
 #include "config.h"
 #include "config-management.h"
 #include "config-watcher.h"
@@ -76,19 +77,6 @@ static volatile uint64_t g_rta_output_underflow = 0;
 static volatile long g_gpu_clock_mhz_x10 = 0;
 static volatile int g_gpu_clock_thread_running = 0;
 static pthread_t g_gpu_clock_thread;
-
-/* Shared state written by capture thread, read by main thread.
- * Protected by a mutex that is held only for a memcpy — never during DRM renders
- * or libltc decode, so the capture thread never blocks for more than ~1us. */
-typedef struct {
-    ltc_frame_t frame;
-    int         fresh;      /* 1 = new frame since last main-thread read */
-    time_t      last_seen;
-    uint64_t    ingest_mono_ns;
-    uint64_t    frame_mono_ns;
-    uint64_t    frame_start_est_ns;
-    uint64_t    frame_end_est_ns;
-} ltc_shared_t;
 
 typedef struct {
     rtaudio_t       rta;
@@ -177,6 +165,63 @@ static void *gpu_clock_reader_thread(void *arg)
     return NULL;
 }
 
+/* Feed+drain+publish, shared by every ingest source (RtAudio/ALSA callback
+ * below, and the AES67 multicast receiver in src/aes67.c). Keeping this in
+ * one place means every source hands decoded frames to the render loop in
+ * byte-for-byte the same way — including the drain-loop safety cap, whose
+ * absence caused a real RT-priority spin/watchdog-reboot on 2026-08-01. */
+void ltc_feed_and_publish(ltc_decoder_t *decoder, ltc_shared_t *shared,
+                          pthread_mutex_t *shared_mutex,
+                          const int16_t *pcm, unsigned int nframes,
+                          uint64_t ingest_ns)
+{
+    if (!pcm || nframes == 0) {
+        return;
+    }
+
+    /* Feed and decode outside the shared mutex — decoder is only ever
+     * touched from whichever single thread is currently feeding it. */
+    ltc_feed_audio(decoder, pcm, nframes, 1);
+    uint64_t callback_end_sample = decoder->sample_pos;
+
+    /* Hard cap on the drain loop: the libltc queue holds at most 32 frames,
+     * so anything past that means a state bug is feeding us frames forever —
+     * and an unbounded loop here runs at RT priority on the isolated core,
+     * where it starves the whole system (observed 2026-08-01: RR-80 spin →
+     * watchdog reboot). Bail out and let the next batch continue. */
+    int drain_budget = 64;
+    ltc_frame_t decoded;
+    while (drain_budget-- > 0 && ltc_get_frame(decoder, &decoded) == 0) {
+        struct timespec ts_now;
+        clock_gettime(CLOCK_MONOTONIC, &ts_now);
+        uint64_t mono_ns = (uint64_t)ts_now.tv_sec * 1000000000ULL + (uint64_t)ts_now.tv_nsec;
+        uint64_t frame_end_est_ns = ingest_ns;
+        uint64_t frame_start_est_ns = ingest_ns;
+
+        if (callback_end_sample >= decoded.sample_off_end) {
+            uint64_t back_samples = callback_end_sample - decoded.sample_off_end;
+            uint64_t back_ns = (back_samples * 1000000000ULL) / ALSA_CAPTURE_RATE;
+            frame_end_est_ns = (ingest_ns > back_ns) ? (ingest_ns - back_ns) : 0;
+        }
+        if (callback_end_sample >= decoded.sample_off_start) {
+            uint64_t back_samples = callback_end_sample - decoded.sample_off_start;
+            uint64_t back_ns = (back_samples * 1000000000ULL) / ALSA_CAPTURE_RATE;
+            frame_start_est_ns = (ingest_ns > back_ns) ? (ingest_ns - back_ns) : 0;
+        }
+
+        /* Mutex held only for the tiny shared-result copy (~<1 µs). */
+        pthread_mutex_lock(shared_mutex);
+        shared->frame     = decoded;
+        shared->fresh     = 1;
+        shared->last_seen = time(NULL);
+        shared->ingest_mono_ns = ingest_ns;
+        shared->frame_mono_ns = mono_ns;
+        shared->frame_start_est_ns = frame_start_est_ns;
+        shared->frame_end_est_ns = frame_end_est_ns;
+        pthread_mutex_unlock(shared_mutex);
+    }
+}
+
 /* RtAudio input callback — runs in RtAudio's internal callback thread.
  * Receives SINT16 mono frames directly from HiFiBerry ADC.
  * No bit-shifting or channel extraction: RtAudio opens the device as
@@ -201,47 +246,7 @@ static int ltc_rtaudio_callback(void *out, void *in, unsigned int nframes,
     clock_gettime(CLOCK_MONOTONIC, &ts_ingest);
     uint64_t ingest_ns = (uint64_t)ts_ingest.tv_sec * 1000000000ULL + (uint64_t)ts_ingest.tv_nsec;
 
-    /* Feed and decode outside the shared mutex — decoder is only ever
-     * touched from this single callback thread. */
-    ltc_feed_audio(ctx->decoder, pcm, nframes, 1);
-    uint64_t callback_end_sample = ctx->decoder->sample_pos;
-
-    /* Hard cap on the drain loop: the libltc queue holds at most 32 frames,
-     * so anything past that means a state bug is feeding us frames forever —
-     * and an unbounded loop here runs at RT priority on the isolated core,
-     * where it starves the whole system (observed 2026-08-01: RR-80 spin →
-     * watchdog reboot). Bail out and let the next callback continue. */
-    int drain_budget = 64;
-    ltc_frame_t decoded;
-    while (drain_budget-- > 0 && ltc_get_frame(ctx->decoder, &decoded) == 0) {
-        struct timespec ts_now;
-        clock_gettime(CLOCK_MONOTONIC, &ts_now);
-        uint64_t mono_ns = (uint64_t)ts_now.tv_sec * 1000000000ULL + (uint64_t)ts_now.tv_nsec;
-        uint64_t frame_end_est_ns = ingest_ns;
-        uint64_t frame_start_est_ns = ingest_ns;
-
-        if (callback_end_sample >= decoded.sample_off_end) {
-            uint64_t back_samples = callback_end_sample - decoded.sample_off_end;
-            uint64_t back_ns = (back_samples * 1000000000ULL) / ALSA_CAPTURE_RATE;
-            frame_end_est_ns = (ingest_ns > back_ns) ? (ingest_ns - back_ns) : 0;
-        }
-        if (callback_end_sample >= decoded.sample_off_start) {
-            uint64_t back_samples = callback_end_sample - decoded.sample_off_start;
-            uint64_t back_ns = (back_samples * 1000000000ULL) / ALSA_CAPTURE_RATE;
-            frame_start_est_ns = (ingest_ns > back_ns) ? (ingest_ns - back_ns) : 0;
-        }
-
-        /* Mutex held only for the tiny shared-result copy (~<1 µs). */
-        pthread_mutex_lock(ctx->shared_mutex);
-        ctx->shared->frame     = decoded;
-        ctx->shared->fresh     = 1;
-        ctx->shared->last_seen = time(NULL);
-        ctx->shared->ingest_mono_ns = ingest_ns;
-        ctx->shared->frame_mono_ns = mono_ns;
-        ctx->shared->frame_start_est_ns = frame_start_est_ns;
-        ctx->shared->frame_end_est_ns = frame_end_est_ns;
-        pthread_mutex_unlock(ctx->shared_mutex);
-    }
+    ltc_feed_and_publish(ctx->decoder, ctx->shared, ctx->shared_mutex, pcm, nframes, ingest_ns);
     return 0;
 }
 
@@ -899,36 +904,19 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    rtaudio_ctx_t rtactx;
-    memset(&rtactx, 0, sizeof(rtactx));
-    rtactx.decoder      = &ltc;
-    rtactx.shared       = &ltc_shared;
-    rtactx.shared_mutex = &ltc_mutex;
-
-    rtactx.rta = rtaudio_create(RTAUDIO_API_LINUX_ALSA);
-    if (!rtactx.rta) {
-        fprintf(stderr, "[RTA] Failed to create RtAudio ALSA instance\n");
-        pthread_mutex_destroy(&ltc_mutex);
-        ltc_decoder_cleanup(&ltc);
-        display_backend_cleanup(&g_backend);
-        return EXIT_FAILURE;
-    }
-
-    unsigned int rta_dev = rta_find_hifiberry_input(rtactx.rta);
-    if (rta_dev == UINT_MAX) {
-        fprintf(stderr, "[RTA] No valid input device available\n");
-        rtaudio_destroy(rtactx.rta);
-        pthread_mutex_destroy(&ltc_mutex);
-        ltc_decoder_cleanup(&ltc);
-        display_backend_cleanup(&g_backend);
-        return EXIT_FAILURE;
-    }
-
-    rtaudio_stream_parameters_t rta_in;
-    memset(&rta_in, 0, sizeof(rta_in));
-    rta_in.device_id     = rta_dev;
-    rta_in.num_channels  = 1;   /* mono — RtAudio extracts channel 0 from hardware */
-    rta_in.first_channel = 0;
+    /* LTC_INPUT_SOURCE=aes67 switches the sole feeder of the decoder from
+     * the RtAudio/ALSA callback to the AES67 multicast receiver thread
+     * below. Mutually exclusive by design, never both at once — see the
+     * comment on aes67_ctx_t in include/aes67.h for why. This is the
+     * v1/test-phase selection mechanism (env var); a later phase is meant
+     * to move this into the live-reloadable config system so it's
+     * switchable from a future web UI without restarting the service —
+     * see the aes67-ltc-over-ip memory note for that plan. */
+    const char *input_source_env = getenv("LTC_INPUT_SOURCE");
+    int use_aes67 = (input_source_env && strcmp(input_source_env, "aes67") == 0);
+    const char *aes67_group_env = getenv("LTC_AES67_GROUP");
+    const char *aes67_group = (aes67_group_env && aes67_group_env[0]) ? aes67_group_env : "239.192.0.1";
+    unsigned int aes67_port = read_env_u32("LTC_AES67_PORT", 5004, 1024, 65535);
 
     g_gpu_clock_thread_running = 1;
     if (pthread_create(&g_gpu_clock_thread, NULL, gpu_clock_reader_thread, NULL) != 0) {
@@ -937,13 +925,6 @@ int main(int argc, char *argv[]) {
         fflush(stderr);
     }
 
-    unsigned int requested_rta_buf = read_env_u32("LTC_RTA_PERIOD_FRAMES",
-                                                  RTAUDIO_CAPTURE_PERIOD_FRAMES,
-                                                  16,
-                                                  2048);
-    unsigned int rta_buf = requested_rta_buf;
-    unsigned int requested_rta_num_buffers = read_env_u32("LTC_RTA_NUM_BUFFERS", 4, 2, 8);
-    unsigned int rta_rt_priority = read_env_u32("LTC_RTA_RT_PRIORITY", 80, 50, 98);
     int ltc_smooth_enable = (int)read_env_u32("LTC_SMOOTH_ENABLE", 1, 0, 1);
     unsigned int ltc_phase_advance_frames = read_env_u32("LTC_PHASE_ADVANCE_FRAMES", 0, 0, 4);
     unsigned int ltc_live_need_render_div = read_env_u32("LTC_LIVE_NEED_RENDER_DIV", 20, 2, 128);
@@ -956,37 +937,81 @@ int main(int argc, char *argv[]) {
         printf("[MAIN] LTC_LOG_VERBOSE=1: logging every rendered/decoded frame (noisy — for debugging only)\n");
     }
 
-    rtaudio_stream_options_t rta_opts;
-    memset(&rta_opts, 0, sizeof(rta_opts));
-    rta_opts.flags       = RTAUDIO_FLAGS_MINIMIZE_LATENCY;
-    if (!no_rt) {
-        rta_opts.flags |= RTAUDIO_FLAGS_SCHEDULE_REALTIME;
-    }
-    rta_opts.num_buffers = requested_rta_num_buffers;
-    rta_opts.priority    = (int)rta_rt_priority;
-    strncpy(rta_opts.name, "ltc-timecode", sizeof(rta_opts.name) - 1);
+    rtaudio_ctx_t rtactx;
+    memset(&rtactx, 0, sizeof(rtactx));
+    aes67_ctx_t aes67ctx;
+    memset(&aes67ctx, 0, sizeof(aes67ctx));
+    pthread_t aes67_tid;
 
-    int rta_rc = rtaudio_open_stream(rtactx.rta,
-                                     NULL, &rta_in,
-                                     RTAUDIO_FORMAT_SINT16,
-                                     ALSA_CAPTURE_RATE,
-                                     &rta_buf,
-                                     ltc_rtaudio_callback,
-                                     &rtactx,
-                                     &rta_opts,
-                                     NULL);
-    if (rta_rc != RTAUDIO_ERROR_NONE) {
-        fprintf(stderr, "[RTA] Open stream failed: %s\n", rtaudio_error(rtactx.rta));
-        rtaudio_destroy(rtactx.rta);
-        pthread_mutex_destroy(&ltc_mutex);
-        ltc_decoder_cleanup(&ltc);
-        display_backend_cleanup(&g_backend);
-        return EXIT_FAILURE;
-    }
-    rtaudio_start_stream(rtactx.rta);
+    if (!use_aes67) {
+        rtactx.decoder      = &ltc;
+        rtactx.shared       = &ltc_shared;
+        rtactx.shared_mutex = &ltc_mutex;
 
-    clock_gettime(CLOCK_BOOTTIME, &ts);
-    fflush(stdout);
+        rtactx.rta = rtaudio_create(RTAUDIO_API_LINUX_ALSA);
+        if (!rtactx.rta) {
+            fprintf(stderr, "[RTA] Failed to create RtAudio ALSA instance\n");
+            pthread_mutex_destroy(&ltc_mutex);
+            ltc_decoder_cleanup(&ltc);
+            display_backend_cleanup(&g_backend);
+            return EXIT_FAILURE;
+        }
+
+        unsigned int rta_dev = rta_find_hifiberry_input(rtactx.rta);
+        if (rta_dev == UINT_MAX) {
+            fprintf(stderr, "[RTA] No valid input device available\n");
+            rtaudio_destroy(rtactx.rta);
+            pthread_mutex_destroy(&ltc_mutex);
+            ltc_decoder_cleanup(&ltc);
+            display_backend_cleanup(&g_backend);
+            return EXIT_FAILURE;
+        }
+
+        rtaudio_stream_parameters_t rta_in;
+        memset(&rta_in, 0, sizeof(rta_in));
+        rta_in.device_id     = rta_dev;
+        rta_in.num_channels  = 1;   /* mono — RtAudio extracts channel 0 from hardware */
+        rta_in.first_channel = 0;
+
+        unsigned int requested_rta_buf = read_env_u32("LTC_RTA_PERIOD_FRAMES",
+                                                      RTAUDIO_CAPTURE_PERIOD_FRAMES,
+                                                      16,
+                                                      2048);
+        unsigned int rta_buf = requested_rta_buf;
+        unsigned int requested_rta_num_buffers = read_env_u32("LTC_RTA_NUM_BUFFERS", 4, 2, 8);
+        unsigned int rta_rt_priority = read_env_u32("LTC_RTA_RT_PRIORITY", 80, 50, 98);
+
+        rtaudio_stream_options_t rta_opts;
+        memset(&rta_opts, 0, sizeof(rta_opts));
+        rta_opts.flags       = RTAUDIO_FLAGS_MINIMIZE_LATENCY;
+        if (!no_rt) {
+            rta_opts.flags |= RTAUDIO_FLAGS_SCHEDULE_REALTIME;
+        }
+        rta_opts.num_buffers = requested_rta_num_buffers;
+        rta_opts.priority    = (int)rta_rt_priority;
+        strncpy(rta_opts.name, "ltc-timecode", sizeof(rta_opts.name) - 1);
+
+        int rta_rc = rtaudio_open_stream(rtactx.rta,
+                                         NULL, &rta_in,
+                                         RTAUDIO_FORMAT_SINT16,
+                                         ALSA_CAPTURE_RATE,
+                                         &rta_buf,
+                                         ltc_rtaudio_callback,
+                                         &rtactx,
+                                         &rta_opts,
+                                         NULL);
+        if (rta_rc != RTAUDIO_ERROR_NONE) {
+            fprintf(stderr, "[RTA] Open stream failed: %s\n", rtaudio_error(rtactx.rta));
+            rtaudio_destroy(rtactx.rta);
+            pthread_mutex_destroy(&ltc_mutex);
+            ltc_decoder_cleanup(&ltc);
+            display_backend_cleanup(&g_backend);
+            return EXIT_FAILURE;
+        }
+        rtaudio_start_stream(rtactx.rta);
+
+        clock_gettime(CLOCK_BOOTTIME, &ts);
+        fflush(stdout);
         printf("[RTA] Capture started: device=%u req_buf=%u actual_buf=%u frames num_buffers=%u rt_prio=%u S16 mono 48kHz smooth=%s phase_adv=%u"
             " live_sleep[need_div=%u idle_div=%u min_us=%" PRIu64 " max_us=%" PRIu64 "] (boot+%.3f s)\n",
            rta_dev,
@@ -1001,6 +1026,28 @@ int main(int argc, char *argv[]) {
            (uint64_t)(ltc_live_sleep_min_ns / 1000ULL),
            (uint64_t)(ltc_live_sleep_max_ns / 1000ULL),
            ts.tv_sec + ts.tv_nsec/1e9);
+    } else {
+        aes67ctx.decoder      = &ltc;
+        aes67ctx.shared       = &ltc_shared;
+        aes67ctx.shared_mutex = &ltc_mutex;
+        strncpy(aes67ctx.group, aes67_group, sizeof(aes67ctx.group) - 1);
+        aes67ctx.port    = aes67_port;
+        aes67ctx.running = 1;
+
+        if (pthread_create(&aes67_tid, NULL, aes67_receiver_thread, &aes67ctx) != 0) {
+            fprintf(stderr, "[AES67] Failed to start receiver thread\n");
+            pthread_mutex_destroy(&ltc_mutex);
+            ltc_decoder_cleanup(&ltc);
+            display_backend_cleanup(&g_backend);
+            return EXIT_FAILURE;
+        }
+
+        clock_gettime(CLOCK_BOOTTIME, &ts);
+        fflush(stdout);
+        printf("[MAIN] LTC_INPUT_SOURCE=aes67: RtAudio/ALSA capture NOT started, "
+               "AES67 receiver targeting %s:%u instead (boot+%.3f s)\n",
+               aes67_group, aes67_port, ts.tv_sec + ts.tv_nsec/1e9);
+    }
 
     /* Main render loop */
     uint64_t frame_count = 0;
@@ -2155,6 +2202,17 @@ int main(int argc, char *argv[]) {
         g_gpu_clock_thread_running = 0;
         pthread_join(g_gpu_clock_thread, NULL);
         log_shutdown_checkpoint("gpu_clock_thread join: done");
+    }
+    /* AES67 receiver join, mirroring the gpu_clock_thread pattern above.
+     * Unlike rtaudio_abort_stream(), this has no known kernel-lock hang
+     * risk — it's a plain UDP socket, and the receive loop already wakes
+     * on its own every AES67_RECV_TIMEOUT_MS to re-check ctx->running, so
+     * this join is bounded regardless of whether a sender is present. */
+    if (use_aes67 && aes67ctx.running) {
+        log_shutdown_checkpoint("aes67_thread join: start");
+        aes67ctx.running = 0;
+        pthread_join(aes67_tid, NULL);
+        log_shutdown_checkpoint("aes67_thread join: done");
     }
     {
         struct sched_param revert_param = {0};

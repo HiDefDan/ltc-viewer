@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <time.h>
+#include <pthread.h>
 #include <ltc.h>
 
 /* LTC timecode frame (24-bit + parity) */
@@ -16,6 +17,23 @@ typedef struct {
     uint64_t sample_off_start; /* libltc sample offset for start of decoded frame */
     uint64_t sample_off_end;   /* libltc sample offset for end of decoded frame */
 } ltc_frame_t;
+
+/* Shared state written by whichever capture/receiver thread is active
+ * (RtAudio/ALSA callback, or the AES67 multicast receiver thread), read by
+ * the main render thread. Protected by a mutex that's held only for a
+ * memcpy-sized copy — never during DRM renders or libltc decode, so the
+ * feeding thread never blocks for more than ~1us. Moved here (was main.c
+ * only) so more than one ingest source can share the same publish path via
+ * ltc_feed_and_publish(). */
+typedef struct {
+    ltc_frame_t frame;
+    int         fresh;      /* 1 = new frame since last main-thread read */
+    time_t      last_seen;
+    uint64_t    ingest_mono_ns;
+    uint64_t    frame_mono_ns;
+    uint64_t    frame_start_est_ns;
+    uint64_t    frame_end_est_ns;
+} ltc_shared_t;
 
 /* LTC decoder state machine (uses libltc internally) */
 typedef struct {
@@ -60,6 +78,22 @@ uint32_t ltc_get_nominal_fps(const ltc_decoder_t *decoder);
 
 /* Get cumulative continuity gap events (delta > 1 frame). */
 uint64_t ltc_get_gap_count(const ltc_decoder_t *decoder);
+
+/* Feed a batch of mono int16 samples to the decoder, drain every LTC frame
+ * it produces, and publish each one to *shared under shared_mutex — the
+ * exact feed+drain+publish sequence the RtAudio/ALSA callback used to do
+ * inline, factored out so the AES67 receiver thread (src/aes67.c) can do
+ * byte-for-byte the same thing regardless of where the samples came from.
+ * ingest_ns is CLOCK_MONOTONIC at the moment this batch was received, used
+ * to back-date each decoded frame's start/end timestamp estimate from its
+ * position within the batch. Defined in main.c (needs no main.c-only
+ * state besides the nominal sample rate, already project-wide in
+ * config.h) — not moved to ltc.c since it's about *publishing* decoded
+ * output, not decoding itself. */
+void ltc_feed_and_publish(ltc_decoder_t *decoder, ltc_shared_t *shared,
+                          pthread_mutex_t *shared_mutex,
+                          const int16_t *pcm, unsigned int nframes,
+                          uint64_t ingest_ns);
 
 /* Cleanup decoder resources */
 void ltc_decoder_cleanup(ltc_decoder_t *decoder);
