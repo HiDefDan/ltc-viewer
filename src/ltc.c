@@ -208,6 +208,15 @@ int ltc_feed_audio(ltc_decoder_t *decoder, const int16_t *samples,
             decoder->lock_streak = 0;
             memset(&decoder->pending_decoded, 0, sizeof(decoder->pending_decoded));
             decoder->gap_reset_armed = 1;
+            /* Whatever comes back after a real gap may be a different
+             * source at a different rate. Clear the smoothed measurement
+             * too, not just the pair-continuity state, so re-lock reseeds
+             * fresh instead of slow-blending from the old rate (that stale
+             * carry-over was the residual cause of the rate indicator still
+             * stepping through intermediate candidates after the pre-lock
+             * pollution fix above). */
+            decoder->detected_fps = 0.0f;
+            decoder->detected_fps_inst = 0.0f;
             printf("[LTC] Input gap %.3fs -> reset lock state\n",
                    (double)silent_samples / (double)ALSA_CAPTURE_RATE);
         }
@@ -243,7 +252,18 @@ int ltc_get_frame(ltc_decoder_t *decoder, ltc_frame_t *frame) {
 
         if (span > 0) {
             float inst_fps = (float)ALSA_CAPTURE_RATE / (float)span;
-            if (inst_fps > 10.0f && inst_fps < 120.0f) {
+            /* Only let genuinely locked frames feed the smoothed measurement.
+             * Pre-lock frame-boundary detections (and, on any single frame,
+             * an insane one) can have wildly wrong spans without libltc's
+             * queue rejecting them outright -- that's the whole reason the
+             * lock_streak/pair-continuity check below exists, but it used to
+             * only protect the *displayed* timecode, not this measurement.
+             * A bad value seeded here (the first-ever sample is a hard
+             * assignment, not blended) previously took many frames of 90/10
+             * smoothing to recover from, which is what let a genuine
+             * 23.976fps source transiently classify as 25 or 24, and a
+             * genuine 30fps source transiently classify as 29.97. */
+            if (inst_fps > 10.0f && inst_fps < 120.0f && frame_sane && decoder->valid) {
                 decoder->detected_fps_inst = inst_fps;
                 if (decoder->detected_fps <= 0.0f) {
                     decoder->detected_fps = inst_fps;
@@ -305,6 +325,11 @@ int ltc_get_frame(ltc_decoder_t *decoder, ltc_frame_t *frame) {
                             decoder->valid = 0;
                             decoder->lock_streak = 0;
                             memset(&decoder->pending_decoded, 0, sizeof(decoder->pending_decoded));
+                            /* A retune this large means our clock model was
+                             * wrong for whatever's arriving now -- same
+                             * stale-carry-over reasoning as the gap reset. */
+                            decoder->detected_fps = 0.0f;
+                            decoder->detected_fps_inst = 0.0f;
                         }
                     }
                 }
@@ -407,6 +432,11 @@ int ltc_get_frame(ltc_decoder_t *decoder, ltc_frame_t *frame) {
                 decoder->valid = 0;
                 decoder->lock_streak = 1;
                 decoder->pending_decoded = candidate;
+                /* Same stale-carry-over reasoning: whatever re-locks next
+                 * might be a different rate, so don't let it inherit the
+                 * old lock's smoothed fps as a blending seed. */
+                decoder->detected_fps = 0.0f;
+                decoder->detected_fps_inst = 0.0f;
                 return -1;
             }
 
