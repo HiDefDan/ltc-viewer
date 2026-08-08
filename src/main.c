@@ -594,7 +594,8 @@ static void build_output_render_state(gbm_render_state_t *out_state,
                                       const char *overlay_str,
                                       uint32_t overlay_color,
                                       int df_flag,
-                                      const char *rate_label)
+                                      const char *rate_label,
+                                      uint32_t rate_color)
 {
     int portrait_mode = (fb_height > fb_width);
     uint32_t render_width = portrait_mode ? fb_height : fb_width;
@@ -763,6 +764,7 @@ static void build_output_render_state(gbm_render_state_t *out_state,
     out_state->df_flag = df_flag;
     snprintf(out_state->rate_str, sizeof(out_state->rate_str), "%s", rate_str);
     out_state->show_df = show_df;
+    out_state->rate_color = rate_color;
     out_state->rate_x = rate_x;
     out_state->rate_y = rate_y;
     out_state->df_x = df_x;
@@ -1464,13 +1466,6 @@ int main(int argc, char *argv[]) {
                 ((uint32_t)text_x_final - scaled_digit_width) : 0;
 
             char overlay_str[32] = {0};
-            /* df is gated on display_ltc_active (same signal driving the
-             * rate classification below and the main text's hold-last-frame
-             * behavior), not the stricter ltc_live 1s-freshness check —
-             * they need to lock together as one feature. Gating df on
-             * ltc_live alone made it drop out of sight before the rate label
-             * or the held timecode did on signal loss. */
-            unsigned int df_flag = (display_ltc_active && last_ltc_frame.drop_frame) ? 1u : 0u;
 
             /* Rate classification: computed once per frame (not per output
              * — an active second display must not double-advance the
@@ -1490,6 +1485,24 @@ int main(int argc, char *argv[]) {
             static int rate_pending_idx = -1;
             static int rate_streak = 0;
             static int rate_displayed_idx = -1;
+            /* Frozen render-only snapshot of the last confirmed rate/df,
+             * deliberately kept separate from the live streak state above.
+             * The live state (rate_pending_idx/rate_streak/rate_displayed_idx)
+             * must keep resetting the instant display_ltc_active drops —
+             * unconditionally, not gated on the fade — so that if a *new*
+             * source locks before the old source's loss-fade has finished
+             * (a quick cable swap), its classification starts from a clean
+             * slate rather than inheriting the outgoing source's rate as a
+             * false starting point. That carrying-over was tried as part of
+             * this same fade-sync work and regressed the hysteresis fix:
+             * it let a stale rate re-appear, unrelated to the new signal,
+             * for up to a confirm streak's worth of frames. This snapshot
+             * is what actually gets faded out below — it stops tracking the
+             * instant the live state resets, so it only ever reflects
+             * genuinely-confirmed history, never anything from a source
+             * that's already been superseded. */
+            static int held_rate_idx = -1;
+            static int held_df_flag = 0;
             const char *rate_label = "";
             if (display_ltc_active) {
                 if (got_ltc) {
@@ -1509,10 +1522,33 @@ int main(int argc, char *argv[]) {
                 if (rate_displayed_idx >= 0) {
                     rate_label = RATE_LABELS[rate_displayed_idx];
                 }
+                held_rate_idx = rate_displayed_idx;
+                held_df_flag = (last_ltc_frame.drop_frame && rate_displayed_idx >= 0) ? 1 : 0;
             } else {
+                /* Reset immediately and unconditionally — this is the exact
+                 * behavior the hysteresis fix relies on. Do NOT gate this on
+                 * source_fade_active; see the comment above. */
                 rate_pending_idx = -1;
                 rate_streak = 0;
                 rate_displayed_idx = -1;
+                if (!source_fade_active) {
+                    held_rate_idx = -1;
+                    held_df_flag = 0;
+                }
+            }
+
+            /* What actually gets rendered: the live value while LTC is
+             * active, the frozen snapshot while fading out (so the row eases
+             * out in step with the main text instead of vanishing the
+             * instant the source is lost), nothing once fully settled. */
+            const char *render_rate_label = "";
+            unsigned int df_flag = 0u;
+            if (display_ltc_active) {
+                render_rate_label = rate_label;
+                df_flag = (last_ltc_frame.drop_frame && rate_displayed_idx >= 0) ? 1u : 0u;
+            } else if (source_fade_active && held_rate_idx >= 0) {
+                render_rate_label = RATE_LABELS[held_rate_idx];
+                df_flag = (unsigned int)held_df_flag;
             }
 
             float overlay_scale = glyph_scale * 0.23f;
@@ -1541,6 +1577,17 @@ int main(int argc, char *argv[]) {
             uint64_t elapsed_ns = 0;
             uint32_t from_color = 0;
             uint32_t to_color = 0;
+            /* Rate/df row color, alpha-matched to whichever side of the main
+             * text's crossfade currently represents live LTC — see the
+             * rate_label/df_flag holds above. Not fading: fully opaque,
+             * same red the main text uses while LTC is active (the row is
+             * never drawn otherwise, since rate_label/df_flag are both empty
+             * once settled into ToD). Fading out of LTC: matches
+             * fade_from_color's alpha AND color, since target_text_color
+             * itself has already flipped to the ToD color by this point.
+             * Fading into LTC: matches fade_to_color's alpha, which is just
+             * target_text_color. */
+            uint32_t rate_color = (0xFFu << 24) | (target_text_color & 0x00FFFFFFu);
             if (source_fade_active) {
                 source_fade_duration_ns = (uint64_t)(current_config.transition_fade_ms > 0
                     ? current_config.transition_fade_ms : 0) * 1000000ULL;
@@ -1553,6 +1600,9 @@ int main(int argc, char *argv[]) {
                                       &alpha_from, &alpha_to);
                 from_color = ((alpha_from & 0xFFu) << 24) | (fade_from_color & 0x00FFFFFFu);
                 to_color = ((alpha_to & 0xFFu) << 24) | (fade_to_color & 0x00FFFFFFu);
+                rate_color = display_ltc_active
+                    ? ((alpha_to & 0xFFu) << 24) | (target_text_color & 0x00FFFFFFu)
+                    : ((alpha_from & 0xFFu) << 24) | (fade_from_color & 0x00FFFFFFu);
             }
 
             if (g_backend.type == DISPLAY_BACKEND_GBM) {
@@ -1597,7 +1647,7 @@ int main(int argc, char *argv[]) {
                                                fade_to_str, to_color,
                                                current_config.debug_overlay_enabled,
                                                overlay_str, overlay_color, (int)df_flag,
-                                               rate_label);
+                                               render_rate_label, rate_color);
 
                     int render_rc = display_backend_render_output(&g_backend, out_idx, &gbm_state);
 

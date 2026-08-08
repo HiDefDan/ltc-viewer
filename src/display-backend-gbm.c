@@ -512,8 +512,8 @@ static int gbm_render_to_output(ltc_gbm_output_t *out, const gbm_render_state_t 
                              (float)state->rate_x,
                              (float)state->rate_y,
                              state->rate_scale,
-                             state->target_text_color,
-                             0,
+                             state->rate_color,
+                             1,
                              state->portrait_mode,
                              state->logical_width,
                              state->logical_height);
@@ -523,8 +523,8 @@ static int gbm_render_to_output(ltc_gbm_output_t *out, const gbm_render_state_t 
                              (float)state->df_x,
                              (float)state->df_y,
                              state->rate_scale,
-                             state->target_text_color,
-                             0,
+                             state->rate_color,
+                             1,
                              state->portrait_mode,
                              state->logical_width,
                              state->logical_height);

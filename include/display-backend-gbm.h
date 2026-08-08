@@ -63,6 +63,14 @@ typedef struct {
      * boundary between the two FF digit cells. */
     char rate_str[12];
     int show_df;
+    /* Alpha-packed (top byte) color for the real rate_str/dF glyphs, kept
+     * separate from target_text_color: during a source-transition fade this
+     * tracks whichever side of the crossfade currently represents live LTC,
+     * so the row eases in/out in lockstep with the main timecode instead of
+     * snapping at full opacity the instant it appears/disappears. Drawn with
+     * use_alpha=1, unlike the dim "88.88"/"dF" background beneath it, which
+     * stays a fixed static reference regardless of fade state. */
+    uint32_t rate_color;
     uint32_t rate_x, rate_y;
     uint32_t df_x, df_y;
     float rate_scale;
