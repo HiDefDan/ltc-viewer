@@ -44,6 +44,43 @@ Low-latency LTC timecode display appliance for Raspberry Pi CM5 using DRM/KMS fr
 - Default URL: `http://<device-ip>:8080`
 - Supports timezone, network, display position, color settings, and LTC/ToD transition fade duration
 
+## LTC Ingest: HiFiBerry (default) or AES67 over IP
+
+The decoder is fed by exactly one source at a time, selected at startup. The
+default is the HiFiBerry ADC over ALSA; setting `LTC_INPUT_SOURCE=aes67`
+instead starts a network receiver and does not open the audio device at all.
+The two are mutually exclusive by design — the LTC decoder is not safe to feed
+from two threads.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LTC_INPUT_SOURCE` | *(unset — HiFiBerry/ALSA)* | Set to `aes67` for the network receiver |
+| `LTC_AES67_GROUP` | `239.192.0.1` | Address to listen on: a multicast group (joined explicitly) **or** this host's own unicast address |
+| `LTC_AES67_PORT` | `5004` | UDP port |
+
+The receiver expects AES67-style RTP carrying `L24/48000/1` (24-bit big-endian
+PCM, 48 kHz, mono). The payload type is logged but not validated, since it is
+dynamically negotiated in practice. Samples are truncated to 16-bit before
+being handed to the decoder — LTC is a bilevel FM-encoded signal, so the low
+8 bits carry nothing of interest.
+
+Both multicast and unicast are supported because the choice can matter a great
+deal in practice: cheap unmanaged switches sometimes enforce a multicast
+forwarding ceiling far below line rate. One in testing capped at roughly
+300 pps, shredding a 1000 pps stream (~70% loss, audible as constant decode
+gaps), while the identical stream sent unicast arrived complete over the same
+switch. If a multicast source is lossy, try unicast before suspecting the
+receiver.
+
+Example — decode a unicast AES67 stream instead of the HiFiBerry input:
+
+```
+LTC_INPUT_SOURCE=aes67 LTC_AES67_GROUP=10.0.23.205 LTC_AES67_PORT=5004 ltc-timecode
+```
+
+Note this is a startup-time selection via the service environment; moving it
+into the live-reloadable config (and the web UI) is intended but not yet done.
+
 ## UX Framegrabs (Temporary)
 
 - For offline UX review, the renderer supports one-shot framegrabs from the actual render buffer when `LTC_FRAMEGRAB_DIR` is set in the service environment.

@@ -7,10 +7,13 @@
 
 /* Minimal, hand-rolled AES67-style multicast RTP receiver.
  *
- * Deliberately narrow scope for a v1: one fixed multicast group/port, no
- * PTP, no RTCP, no SAP/SDP discovery — the group/port are supplied by
- * whoever starts the thread (env var for now; see main.c LTC_INPUT_SOURCE/
- * LTC_AES67_GROUP/LTC_AES67_PORT). Parses the 12-byte RTP header and feeds
+ * Deliberately narrow scope for a v1: one fixed address/port, no PTP, no
+ * RTCP, no SAP/SDP discovery — the address/port are supplied by whoever
+ * starts the thread (env var for now; see main.c LTC_INPUT_SOURCE/
+ * LTC_AES67_GROUP/LTC_AES67_PORT). The address may be either a multicast
+ * group (joined explicitly) or this host's own unicast address (no join
+ * needed) — auto-detected in aes67.c, see the comment there for why both
+ * are worth supporting. Parses the 12-byte RTP header and feeds
  * audio/L24 (24-bit big-endian PCM per RFC 3190) payload straight into the
  * existing LTC decoder via ltc_feed_and_publish(), the same publish path
  * the RtAudio/ALSA callback uses — see main.c. Genuinely verified only

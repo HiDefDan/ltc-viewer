@@ -317,6 +317,98 @@ yet built. If that lands, reconsider whether `systemd-backlight` should be unmas
 (to persist a user-set value across reboots) or left masked with `sysfs.conf` only
 governing the boot-time default while the UI adjusts live at runtime.
 
+## 5f. AES67 / PTP Network Ingest (Optional Alternative to HiFiBerry)
+
+Only needed on units taking LTC over the network instead of the XLR input. The
+application side is documented in `README.md` (`LTC_INPUT_SOURCE=aes67`); this
+section covers the system config, which is **not** in the repo.
+
+### Prefer unicast unless you know the switch is up to it
+
+An unmanaged switch in testing enforced a multicast forwarding ceiling of about
+300 pps, destroying a 1000 pps AES67 stream (~70% loss). The same stream sent
+unicast crossed that same switch perfectly at 1000.1 pps with zero sequence
+gaps. Unless the deployment uses a managed switch with proper multicast
+handling, **configure the sender for unicast to the appliance's address** and
+point `LTC_AES67_GROUP` at that address. See `CHANGELOG.md` 2026-08-09.
+
+To sanity-check a stream's arrival rate without installing anything:
+
+```bash
+python3 - <<'EOF'
+import socket, time
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("", 5004)); s.settimeout(1.0)
+n = 0; t0 = time.time()
+while time.time() - t0 < 10:
+    try: s.recvfrom(2048); n += 1
+    except socket.timeout: pass
+print(f"{n/10:.1f} pps")
+EOF
+```
+
+A 1 ms packet time stream should read ~1000 pps. Anything substantially lower
+is network loss, not a decoder problem.
+
+### PTP follower (`linuxptp`)
+
+PTP is **not required** for LTC decode — LTC is self-clocking. Set this up only
+if media-clock alignment is genuinely needed.
+
+```bash
+sudo apt install linuxptp
+```
+
+Two settings in `/etc/linuxptp/ptp4l.conf` are required on this hardware:
+
+```
+clientOnly              1
+delay_mechanism         NONE
+```
+
+`clientOnly 1` stops the appliance ever electing itself grandmaster.
+`delay_mechanism NONE` is a workaround, not a preference: with the default
+`E2E` the port enters an endless `Delay_Req` → `timed out while polling for tx
+timestamp` → `FAULTY` cycle. This is unexplained — direct `SO_TIMESTAMPING`
+testing proves the PHY hardware-stamps every relevant message type and cast
+combination in ~4.3 ms — so do not "fix" this back to `E2E` without retesting.
+
+### Boot race: ptp4l must wait for the PHY
+
+The packaged `ptp4l@.service` starts early enough to race NetworkManager's
+interface bring-up. If it wins, `SIOCSHWTSTAMP` lands on the MAC instead of the
+PHY, returns `EINVAL`, and the port parks in `FAULTY` **permanently** — this
+fault class does not auto-retry (observed dead for 85 minutes after a boot).
+
+```bash
+sudo mkdir -p /etc/systemd/system/ptp4l@eth0.service.d
+sudo tee /etc/systemd/system/ptp4l@eth0.service.d/override.conf >/dev/null <<'EOF'
+[Service]
+ExecStartPre=/bin/sh -c 'for i in $(seq 60); do [ -e /sys/class/net/eth0/phydev ] && sleep 1 && exit 0; sleep 0.5; done; exit 0'
+Restart=on-failure
+RestartSec=5
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now ptp4l@eth0.service
+```
+
+The `phydev` symlink appears exactly when the PHY attaches, making it a
+reliable gate.
+
+### Verifying
+
+```bash
+sudo pmc -u -b 0 'GET PARENT_DATA_SET'    # expect the grandmaster's identity, not our own
+sudo pmc -u -b 0 'GET CURRENT_DATA_SET'   # expect stepsRemoved 1, offsetFromMaster converging
+journalctl -u ptp4l@eth0.service -f       # expect 's2' servo lines, no FAULTY cycling
+```
+
+Seeing this unit's own clock identity as `grandmasterIdentity`, or
+`gmPresent false`, means no Sync is arriving — check the switch before
+suspecting the NIC. Diagnostic scripts for PTP hardware timestamping live in
+`~/ptp-diagnostics/` on the development unit.
+
 ## 6. HiFiBerry LTC Input Routing
 
 Detected card is expected to be card 2 (`sndrpihifiberry`).

@@ -49,19 +49,30 @@ void *aes67_receiver_thread(void *arg)
         return NULL;
     }
 
+    /* Multicast vs unicast is decided from the address itself: a multicast
+     * address (224.0.0.0/4) needs an explicit group join, a unicast one
+     * needs nothing — the INADDR_ANY bind above already receives packets
+     * addressed to this host. Supporting both matters in practice: a cheap
+     * unmanaged switch can enforce a multicast forwarding ceiling far below
+     * line rate (one here caps at ~300pps and mangled a 1000pps stream),
+     * where the identical stream sent unicast arrives complete. */
     struct ip_mreq mreq;
     memset(&mreq, 0, sizeof(mreq));
     if (inet_pton(AF_INET, ctx->group, &mreq.imr_multiaddr) != 1) {
-        fprintf(stderr, "[AES67] invalid multicast group address '%s'\n", ctx->group);
+        fprintf(stderr, "[AES67] invalid listen address '%s'\n", ctx->group);
         close(sock);
         return NULL;
     }
-    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) != 0) {
-        fprintf(stderr, "[AES67] failed to join multicast group %s: %s\n",
-                ctx->group, strerror(errno));
-        close(sock);
-        return NULL;
+    int joined_multicast = 0;
+    if (IN_MULTICAST(ntohl(mreq.imr_multiaddr.s_addr))) {
+        mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+        if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) != 0) {
+            fprintf(stderr, "[AES67] failed to join multicast group %s: %s\n",
+                    ctx->group, strerror(errno));
+            close(sock);
+            return NULL;
+        }
+        joined_multicast = 1;
     }
 
     struct timeval rcv_timeout;
@@ -69,7 +80,8 @@ void *aes67_receiver_thread(void *arg)
     rcv_timeout.tv_usec = (AES67_RECV_TIMEOUT_MS % 1000) * 1000;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_timeout, sizeof(rcv_timeout));
 
-    printf("[AES67] Listening on %s:%u (multicast)\n", ctx->group, ctx->port);
+    printf("[AES67] Listening on %s:%u (%s)\n", ctx->group, ctx->port,
+           joined_multicast ? "multicast" : "unicast");
     fflush(stdout);
 
     uint8_t recv_buf[AES67_RECV_BUF_SIZE];
@@ -185,7 +197,9 @@ void *aes67_receiver_thread(void *arg)
            packets_received, seq_gaps);
     fflush(stdout);
 
-    setsockopt(sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+    if (joined_multicast) {
+        setsockopt(sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+    }
     close(sock);
     return NULL;
 }

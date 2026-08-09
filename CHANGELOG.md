@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-08-09
+
+### Added
+- AES67 ingest now accepts a **unicast** listen address as well as a multicast group, auto-detected from the address itself (`IN_MULTICAST`) — a multicast address is joined explicitly as before, a unicast one needs no join since the `INADDR_ANY` bind already receives it. Verified end-to-end against a real AES67 sender (a second Pi 5 running `jltcgen` → PipeWire `rtp-sink`, PTP grandmaster, `L24/48000/1`, PT 127, 1 ms packet time): clean lock at 25 fps, `span=1920` exactly matching 48000/25, APV retuned 1600→1920, correct timecode on the display.
+- This is not a cosmetic addition. An unmanaged LAN switch in testing enforced a multicast forwarding ceiling of ~300 pps, losing ~70% of a 1000 pps AES67 stream — confirmed with four independent measurement methods (`tcpdump`, raw `AF_PACKET` capture, a plain bound UDP socket with a 4 MB `SO_RCVBUF`, and a VLAN-aware raw parser, all converging on the same ~299 pps), and isolated to the switch by a direct-cable test that showed a perfect 1000 pps / zero-gap stream. Sending the identical stream unicast restored full rate (1000.1 pps, zero sequence gaps) over that same switch, with no hardware change.
+
+### Documented
+- `README.md` gained an LTC-ingest section covering `LTC_INPUT_SOURCE` / `LTC_AES67_GROUP` / `LTC_AES67_PORT` — the AES67 path shipped in `b421e0a` was previously undocumented outside the source.
+- `PRODUCTION_IMAGE_GUIDE.md` §5f: PTP follower setup, including a `ptp4l@.service` drop-in that fixes a boot race, and the two `ptp4l.conf` settings this hardware requires.
+
+### Known Issues
+- PTP does not converge on this hardware. `ptp4l` reaches servo state `s2` with the correct grandmaster, but oscillates at ±100–200 µs with frequency corrections swinging ±150 ppm rather than settling (a healthy lock is sub-µs). Suspected to be switch-induced jitter on Sync delivery, unverified. **Not currently blocking**: LTC is self-clocking, so the decoder does not depend on PTP — this matters only for future media-clock alignment.
+- `delay_mechanism NONE` is required in `ptp4l.conf` on this hardware. Setting `E2E` puts the port into an endless `Delay_Req` → `timed out while polling for tx timestamp` → `FAULTY` cycle. The cause is genuinely unexplained: direct `SO_TIMESTAMPING` tests confirm the PHY hardware-stamps transmitted `Sync` *and* `Delay_Req`, multicast *and* unicast, 4/4 in every combination at a steady 4.2–4.4 ms — well inside the configured 100 ms timeout. A resource-contention hypothesis (TX stamping degrading while RX stamping is active) was tested and disproven.
+- `LTC_AES67_GROUP` is now a misnomer, since it accepts a unicast address too. Left as-is for compatibility; worth renaming when this moves into the config file / web UI.
+- The AES67 receiver accepts any RTP arriving on its port. Adequate for a point-to-point rig; source-address and/or SSRC filtering would be needed for a real multi-source deployment.
+
 ## 2026-08-02 (2)
 
 ### Added
